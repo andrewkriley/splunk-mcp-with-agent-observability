@@ -137,6 +137,12 @@
     cursor: pointer;
   }
   button:hover { background: var(--green-bright); }
+  button:disabled,
+  input:disabled {
+    opacity: 0.55;
+    cursor: default;
+  }
+  button:disabled:hover { background: var(--green); }
   footer {
     text-align: center;
     font-size: 0.72rem;
@@ -163,7 +169,7 @@
   </svg>
   <div class="titles">
     <h1>Buttercup Games — AI Ops Assistant</h1>
-    <div class="subtitle">Splunk MCP &middot; Cisco Live AI Builders Workshop</div>
+    <div class="subtitle">Splunk MCP &middot; splunk-mcp-with-agent-observability</div>
   </div>
   <select id="provider" title="LLM provider" disabled>
     <option>Loading...</option>
@@ -172,24 +178,41 @@
 
 <div id="log"></div>
 <form id="chat-form">
-  <input id="message" type="text" placeholder="Search> any high severity notables in the last 30 days?" autocomplete="off" required>
-  <button type="submit">Search</button>
+  <input id="message" type="text" maxlength="4000" placeholder="Search> any high severity notables in the last 30 days?" autocomplete="off" required>
+  <button id="submit" type="submit" disabled>Search</button>
 </form>
-<footer>Answers are grounded in live Splunk data via MCP, traced to Galileo.</footer>
+<footer>Answers are grounded in live Splunk data via MCP, traced to Splunk Agent Observability (Galileo).</footer>
 
 <script>
 const log = document.getElementById("log");
 const form = document.getElementById("chat-form");
 const input = document.getElementById("message");
+const submitButton = document.getElementById("submit");
 const providerSelect = document.getElementById("provider");
-const conversationId = crypto.randomUUID(); // one Galileo session per page load
+const conversationId = crypto.randomUUID(); // one Splunk Agent Observability (Galileo) session per page load
 
 const PROVIDER_LABELS = { anthropic: "Anthropic", openai: "OpenAI", gemini: "Gemini" };
+
+async function errorDetail(response) {
+  let detail = `Server returned ${response.status}`;
+  try {
+    const body = await response.json();
+    if (typeof body.detail === "string" && body.detail) {
+      detail = body.detail;
+    } else if (Array.isArray(body.detail)) {
+      const parts = body.detail.map((item) => item.msg).filter(Boolean);
+      if (parts.length) detail = parts.join("; ");
+    }
+  } catch (_err) {
+    // Response body was not JSON.
+  }
+  return detail;
+}
 
 async function loadProviders() {
   try {
     const response = await fetch("/config");
-    if (!response.ok) throw new Error(`Server returned ${response.status}`);
+    if (!response.ok) throw new Error(await errorDetail(response));
     const { providers, default_provider } = await response.json();
     providerSelect.innerHTML = "";
     for (const provider of providers) {
@@ -200,6 +223,7 @@ async function loadProviders() {
       providerSelect.appendChild(option);
     }
     providerSelect.disabled = false;
+    submitButton.disabled = false;
   } catch (err) {
     providerSelect.innerHTML = '<option value="">unavailable</option>';
     addMessage("assistant", `Could not load configured LLM providers: ${err.message}`);
@@ -229,6 +253,8 @@ form.addEventListener("submit", async (event) => {
 
   addMessage("user", message);
   input.value = "";
+  input.disabled = true;
+  submitButton.disabled = true;
   const pending = addMessage("pending", "Searching Splunk...");
 
   try {
@@ -237,13 +263,17 @@ form.addEventListener("submit", async (event) => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ message, conversation_id: conversationId, provider: providerSelect.value || null }),
     });
-    if (!response.ok) throw new Error(`Server returned ${response.status}`);
+    if (!response.ok) throw new Error(await errorDetail(response));
     const data = await response.json();
     pending.remove();
     addMessage("assistant", data.reply);
   } catch (err) {
     pending.remove();
     addMessage("assistant", `Error: ${err.message}`);
+  } finally {
+    input.disabled = false;
+    submitButton.disabled = false;
+    input.focus();
   }
 });
 </script>

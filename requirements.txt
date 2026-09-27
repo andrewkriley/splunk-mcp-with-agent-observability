@@ -1,11 +1,13 @@
-python-dotenv
-requests
-mcp
-galileo
-packaging
+python-dotenv==1.2.3
+requests==2.34.2
+mcp==2.2.0
+galileo==2.6.0
+packaging==26.3
 
-fastapi
-uvicorn
-anthropic
-openai
-google-genai
+fastapi==0.141.1
+uvicorn==0.53.0
+anthropic==1.6.0
+openai==3.14.1
+google-genai==2.24.0
+# Imported directly by app/mcp_client.py (also pulled in by mcp).
+httpx2==2.13.0

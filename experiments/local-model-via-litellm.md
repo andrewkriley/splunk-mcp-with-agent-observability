@@ -3,11 +3,11 @@
 **Status: design only, not implemented.** This describes how the reference
 app (`app/observability.py`, `app/agent.py`, `app/main.py`) could add a
 `local` provider backed by a LiteLLM proxy serving a locally-hosted model,
-while still sending telemetry to Galileo. No code changes have been made —
+while still sending telemetry to Splunk Agent Observability (Galileo). No code changes have been made —
 this is a plan to build from later, not a working feature.
 
 Not to be confused with [galileo-litellm-custom-provider.md](./galileo-litellm-custom-provider.md),
-which is about a different thing: pointing *Galileo's own scoring backend*
+which is about a different thing: pointing *Splunk Agent Observability (Galileo)'s own scoring backend*
 at LiteLLM over the internet. This experiment is about *our app* calling a
 LiteLLM proxy directly, which is why `localhost` is perfectly fine here —
 the FastAPI app and the LiteLLM proxy can run on the same machine.
@@ -27,7 +27,7 @@ the OpenAI code path with different client config, not a new loop.
 
 ## Where the telemetry falls out for free
 
-`call_openai` already routes through Galileo's native `galileo.openai`
+`call_openai` already routes through Splunk Agent Observability (Galileo)'s native `galileo.openai`
 wrapper (`from galileo.openai import openai`), which intercepts
 `chat.completions.create` regardless of `base_url` — it's patched at the
 method level, not tied to a specific host. A local-model call through that
@@ -36,7 +36,7 @@ OpenAI: no `@log` decorator needed. Two things to override per-call so the
 trace doesn't misrepresent what actually ran:
 
 - `name="local"` (or `"litellm"`) instead of `"openai"`, so it's visually
-  distinct in Galileo's session/trace list from real OpenAI calls (same
+  distinct in Splunk Agent Observability (Galileo)'s session/trace list from real OpenAI calls (same
   trick already used to label the anthropic/openai/gemini spans).
 - `model=<the litellm model_name>` (e.g. `"llama-3.1-70b-instruct"`), so the
   model column shows the real local model. This is automatically satisfied
@@ -89,7 +89,7 @@ trace doesn't misrepresent what actually ran:
    new `.env` vars and `/config` entry, and run one real Splunk MCP question
    through it end to end (matching the manual verification pattern used for
    the other three providers).
-4. Check the resulting Galileo trace: confirm the `llm` span shows
+4. Check the resulting Splunk Agent Observability (Galileo) trace: confirm the `llm` span shows
    `name="local"` and the correct local model name, not `"openai"`/`gpt-4o`.
 
 Nothing here has been run — treat this as a starting point for

@@ -1,17 +1,17 @@
-# Experiment: pointing Galileo's custom LLM provider at LiteLLM
+# Experiment: pointing Splunk Agent Observability (Galileo)'s custom LLM provider at LiteLLM
 
 **Status: untested, exploratory.** Not part of the core workshop — this is
-about configuring the LLM Galileo itself uses to power its scoring/judge
+about configuring the LLM Splunk Agent Observability (Galileo) itself uses to power its scoring/judge
 metrics (e.g. `groundedness`, `tool_selection_quality`), not anything the
 workshop's chat app calls. See the `## Metrics stuck on "queued"` entry in
 `build.md`'s troubleshooting for why this came up: those metrics never
 completed even with a healthy account-level OpenAI integration, and using a
 LiteLLM proxy as a custom provider was one avenue considered for more control
-over (or visibility into) what backs Galileo's scoring calls.
+over (or visibility into) what backs Splunk Agent Observability (Galileo)'s scoring calls.
 
 ## Background
 
-Galileo's console has a "Custom Provider" integration option with a config
+Splunk Agent Observability (Galileo)'s console has a "Custom Provider" integration option with a config
 shape like:
 
 ```json
@@ -38,14 +38,14 @@ shape like:
 [LiteLLM](https://docs.litellm.ai/) runs a proxy that exposes an
 OpenAI-compatible API (`/chat/completions`) in front of many backends
 (OpenAI, Anthropic, Bedrock, etc.), which is exactly the shape a
-"custom provider" integration expects. I could not find a Galileo doc page
+"custom provider" integration expects. I could not find a Splunk Agent Observability (Galileo) doc page
 confirming the exact field semantics below — this is reasoned from the
 schema plus LiteLLM's documented behavior, not verified end-to-end against
-a real Galileo account.
+a real Splunk Agent Observability (Galileo) account.
 
 ## Proposed setup
 
-**1. Run a LiteLLM proxy somewhere Galileo Cloud can reach.** Galileo Cloud
+**1. Run a LiteLLM proxy somewhere Splunk Agent Observability (Galileo) Cloud can reach.** Splunk Agent Observability (Galileo) Cloud
 (`app.galileo.ai`) is a SaaS product — `localhost` won't work. Use a small
 VM, a container behind TLS, or an ngrok/Cloudflare tunnel for a quick test.
 
@@ -68,7 +68,7 @@ general_settings:
 litellm --config config.yaml --port 4000
 ```
 
-**2. Fill in Galileo's custom-provider config:**
+**2. Fill in Splunk Agent Observability (Galileo)'s custom-provider config:**
 
 ```json
 {
@@ -94,15 +94,15 @@ litellm --config config.yaml --port 4000
 ## Mapping rules / open questions
 
 - **`model_properties[].name` must exactly match `model_name` in LiteLLM's
-  `model_list`** — it's the literal string Galileo sends as `"model": "..."`,
+  `model_list`** — it's the literal string Splunk Agent Observability (Galileo) sends as `"model": "..."`,
   and LiteLLM routes on that name to the real backend.
 - **`endpoint` is assumed to be the proxy's base URL, no path suffix** —
   LiteLLM's proxy serves the standard OpenAI paths itself. *Unconfirmed*
-  whether Galileo expects the bare base URL or a full path.
+  whether Splunk Agent Observability (Galileo) expects the bare base URL or a full path.
 - **`api_key_header: "Authorization"`** matches LiteLLM's default (`Authorization:
   Bearer <key>`), where `<key>` is the proxy's `master_key` or a virtual key
   from `/key/generate`. *Unconfirmed* whether `api_key_value` should be the
-  bare key or the full `Bearer <key>` string — Galileo may or may not add the
+  bare key or the full `Bearer <key>` string — Splunk Agent Observability (Galileo) may or may not add the
   `Bearer ` prefix itself.
 - **`supported_parameters` must match the real backend per model**, not be
   copy-pasted across entries — e.g. `reasoning_effort`/`verbosity` are
@@ -111,15 +111,15 @@ litellm --config config.yaml --port 4000
 ## How to actually verify this
 
 1. Run LiteLLM locally with `--debug` so every incoming request is logged.
-2. Trigger a call through Galileo that would use this custom provider (e.g.
-   set it as the scoring/judge model, or test it in Galileo's Playground if
+2. Trigger a call through Splunk Agent Observability (Galileo) that would use this custom provider (e.g.
+   set it as the scoring/judge model, or test it in Splunk Agent Observability (Galileo)'s Playground if
    available).
 3. Read LiteLLM's request log to see the exact path, headers, and body
-   Galileo sent, and confirm/correct the assumptions above.
+   Splunk Agent Observability (Galileo) sent, and confirm/correct the assumptions above.
 4. If it 401s: try both the bare key and the `Bearer `-prefixed value in
    `api_key_value`.
 5. If it 404s: try both the bare host and a host with `/chat/completions`
    appended in `endpoint`.
 
-Nothing here has been run against a live Galileo account yet — treat this as
+Nothing here has been run against a live Splunk Agent Observability (Galileo) account yet — treat this as
 a starting point, not a confirmed working config.

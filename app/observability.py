@@ -1,6 +1,6 @@
-"""Galileo instrumentation for the workshop chat agent.
+"""Splunk Agent Observability (Galileo) instrumentation for the workshop chat agent.
 
-Galileo only ships a native import-swap wrapper for OpenAI (`galileo.openai`)
+Splunk Agent Observability (Galileo) only ships a native import-swap wrapper for OpenAI (`galileo.openai`)
 — it auto-logs every call, no decorator needed. Anthropic and Gemini have no
 such wrapper, so those calls build their span by hand via
 `GalileoLogger.add_llm_span(...)` — not the `@log(span_type="llm")`
@@ -13,22 +13,47 @@ turn is wrapped in one `galileo_context` so every LLM/tool span lands in a
 single trace.
 """
 
+import contextvars
 import json
 import os
 import time
+from collections import OrderedDict
 
 from galileo import galileo_context, log, start_session
 
 from app import mcp_client
 
-_mcp_session = None
-_galileo_sessions: dict[str, str] = {}  # conversation_id -> Galileo session_id, so every
+# Task-local so two overlapping /chat requests cannot share a Splunk session.
+_mcp_session: contextvars.ContextVar = contextvars.ContextVar("splunk_mcp_session")
+_galileo_sessions: dict[str, str] = {}  # conversation_id -> Splunk Agent Observability (Galileo) session_id, so every
                                           # turn in one browser conversation lands in one session
+
+# Prior user/assistant text only. Tool transcripts stay inside the turn that made them.
+MAX_HISTORY_TURNS = 8
+MAX_CONVERSATIONS = 100
+_history: OrderedDict[str, list[dict]] = OrderedDict()
 
 
 def set_mcp_session(session):
-    global _mcp_session
-    _mcp_session = session
+    _mcp_session.set(session)
+
+
+def prior_turns(conversation_id: str) -> list[dict]:
+    turns = _history.get(conversation_id)
+    return list(turns) if turns else []
+
+
+def remember_turn(conversation_id: str, user_message: str, reply: str) -> None:
+    if conversation_id in _history:
+        _history.move_to_end(conversation_id)
+    turns = _history.setdefault(conversation_id, [])
+    turns.append({"role": "user", "content": user_message})
+    turns.append({"role": "assistant", "content": reply})
+    overflow = len(turns) - MAX_HISTORY_TURNS * 2
+    if overflow > 0:
+        del turns[:overflow]
+    while len(_history) > MAX_CONVERSATIONS:
+        _history.popitem(last=False)
 
 
 def _galileo_session_id(conversation_id: str) -> str:
@@ -42,7 +67,7 @@ ANTHROPIC_MODEL = "claude-sonnet-5"
 GEMINI_MODEL = "gemini-3.6-flash"
 
 # KNOWN ISSUE (unresolved): in a real multi-round tool-calling conversation,
-# most (not all) `llm` spans for a worker silently never reach Galileo —
+# most (not all) `llm` spans for a worker silently never reach Splunk Agent Observability (Galileo) —
 # verified repeatedly against the real backend: a 4-6 round conversation
 # typically ends up with only 1 surviving `llm` span, while every `tool`
 # span and the trace's own input/output are unaffected. Investigated over
@@ -72,7 +97,7 @@ def call_openai(messages: list[dict], tools: list[dict], system_prompt: str):
     # argument 'name'`) — confirmed via a live 500 in the running app.
     client = openai.OpenAI(api_key=os.environ["OPENAI_API_KEY"])
     full_messages = [{"role": "system", "content": system_prompt}, *messages]
-    # `name` is captured by Galileo's wrapper for the span label and stripped
+    # `name` is captured by Splunk Agent Observability (Galileo)'s wrapper for the span label and stripped
     # before the real API call — it's not forwarded to OpenAI. The wrapper
     # already reads `model` from these same kwargs for the span's model field.
     return client.chat.completions.create(
@@ -86,7 +111,7 @@ def _anthropic_content_to_log(blocks) -> str:
     @log(span_type="llm")'s generic argument/return-value capture doesn't
     understand Anthropic's block types — a response with a `thinking` block
     fell back to a raw stringified blob instead of a readable message
-    (verified against real Galileo trace data). add_llm_span's `output` only
+    (verified against real Splunk Agent Observability (Galileo) trace data). add_llm_span's `output` only
     renders cleanly as a plain string — passing a dict with a list `content`
     gets silently re-stringified inside a wrapper instead of displayed, so
     this returns text, not a structured value.
@@ -153,7 +178,7 @@ def _gemini_part_to_text(part) -> str:
 
 def _gemini_content_text(content) -> str:
     # add_llm_span's message-list schema wants {"role": ..., "content": <str>}
-    # per entry — verified against real Galileo data that {"role": ...,
+    # per entry — verified against real Splunk Agent Observability (Galileo) data that {"role": ...,
     # "parts": [...]} isn't recognized: every entry's role silently collapsed
     # to "user" and the whole dict got re-stringified into a "content" field
     # instead of being displayed. Flattening parts to text up front avoids
@@ -179,7 +204,7 @@ def call_gemini(contents: list, tools: list[dict], system_prompt: str):
     # as part of the conversation (Gemini keeps it out of `contents` too) and
     # so the response renders as text/function-call parts instead of an
     # opaque blob. Gemini's own role name for its turns is "model" — not a
-    # role Galileo recognizes (verified: that entry alone got wrapped and
+    # role Splunk Agent Observability (Galileo) recognizes (verified: that entry alone got wrapped and
     # re-stringified, role silently defaulted to "user") — mapped to the
     # conventional "assistant" here.
     # The real API call above gets the full `contents` history; only the
@@ -208,18 +233,18 @@ def call_gemini(contents: list, tools: list[dict], system_prompt: str):
 
 @log(span_type="tool")
 async def call_splunk_tool(tool_name: str, arguments: dict) -> str:
-    return await mcp_client.call_tool(_mcp_session, tool_name, arguments)
+    return await mcp_client.call_tool(_mcp_session.get(), tool_name, arguments)
 
 
 async def run_traced_turn(user_message: str, conversation_id: str, provider: str | None = None) -> str:
     from app.agent import run_agent_turn
 
     with galileo_context(
-        project=os.environ.get("GALILEO_PROJECT", "ai-builders-workshop"),
+        project=os.environ.get("GALILEO_PROJECT", "splunk-mcp-with-agent-observability"),
         log_stream=os.environ.get("GALILEO_LOG_STREAM", "default"),
         session_id=_galileo_session_id(conversation_id),
     ):
-        # Without an explicit start_trace/conclude, Galileo lazily creates the
+        # Without an explicit start_trace/conclude, Splunk Agent Observability (Galileo) lazily creates the
         # trace from whichever child span happens to log first — so the trace's
         # own input/output end up being an arbitrary tool call or LLM message
         # list instead of the actual user question and final answer.
@@ -229,8 +254,11 @@ async def run_traced_turn(user_message: str, conversation_id: str, provider: str
         async with mcp_client.splunk_mcp_session() as session:
             set_mcp_session(session)
             tools = await mcp_client.list_splunk_tools(session)
-            result = await run_agent_turn(user_message, tools, provider=provider)
+            result = await run_agent_turn(
+                user_message, tools, provider=provider, history=prior_turns(conversation_id)
+            )
 
         logger.conclude(output=result)
         galileo_context.flush()
+        remember_turn(conversation_id, user_message, result)
         return result

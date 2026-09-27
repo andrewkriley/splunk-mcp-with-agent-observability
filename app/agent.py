@@ -8,26 +8,28 @@ categories (security/infra/general) — a prompt can touch more than one, e.g.
 its own "react" worker agent span with a scoped system prompt and tool
 subset. If more than one category matched, a final synthesis LLM call (no
 tools) combines the workers' findings into one answer; with just one
-category, that worker's own answer is returned directly, no extra call. In
-Galileo this renders as:
+category, that worker's own answer is returned directly, no extra call.
+Prior user and assistant turns for this browser conversation are included
+in each worker's messages, capped, so a follow-up can refer to the previous
+answer. In Splunk Agent Observability (Galileo) this renders as:
 
     trace -> agent(supervisor) -> [agent(classifier), agent(react) -> [llm, tool, ...], agent(react) -> [...], llm(synthesis)?]
 
 Each loop repeats: call the LLM with the tools on offer -> if it asks for a
-tool call, run it via observability.call_splunk_tool (a Galileo `tool`
+tool call, run it via observability.call_splunk_tool (a Splunk Agent Observability (Galileo) `tool`
 span) and feed the result back -> otherwise return its final text. Two
 safety nets, independent of which provider/category is running:
 - MAX_TURNS caps the number of rounds.
-- A repeated-identical-tool-call guard stops immediately if the model calls
-  the exact same tool with the exact same arguments twice — a common real
-  loop failure mode, faster to catch than waiting for the turn cap.
+- A repeated-identical-tool-call guard stops if the model calls the exact
+  same tool with the exact same arguments again later in the same turn — a
+  common real loop failure mode, faster to catch than waiting for the turn cap.
 Either one tripping sets status_code=1 on the worker's agent span when it
-concludes, so a stuck turn is visible/filterable in Galileo rather than
+concludes, so a stuck turn is visible/filterable in Splunk Agent Observability (Galileo) rather than
 just a silent fallback message in the chat.
 
 The LLM calls (call_openai/call_anthropic/call_gemini) are plain sync
 functions, called directly — not via asyncio.to_thread (confirmed broken:
-resolves Galileo's logger to a different object with no active trace,
+resolves Splunk Agent Observability (Galileo)'s logger to a different object with no active trace,
 silently dropping every LLM span) and not via each provider's async client
 either (tried while chasing the KNOWN ISSUE below; broke OpenAI outright,
 since galileo.openai's wrapper only patches the sync client — confirmed via
@@ -37,7 +39,7 @@ them synchronously blocks the event loop for the duration of each request,
 an acceptable tradeoff for this single-user demo.
 
 See the KNOWN ISSUE comment in observability.py: a real multi-round
-conversation still tends to lose most (not all) `llm` spans in Galileo —
+conversation still tends to lose most (not all) `llm` spans in Splunk Agent Observability (Galileo) —
 every `tool` span and the trace's own input/output are unaffected, and this
 has not been root-caused despite extensive investigation. It's an
 observability gap only; the chat app's answers are correct regardless.
@@ -45,6 +47,7 @@ observability gap only; the chat app's answers are correct regardless.
 
 import json
 import os
+import re
 
 from galileo import galileo_context, log
 
@@ -100,6 +103,8 @@ addresses the user's original question."""
 # saia_* tools call a separate Splunk AI Assistant backend that reliably
 # returns server errors on this instance (confirmed) — never offered.
 EXCLUDED_TOOLS = {"saia_generate_spl", "saia_explain_spl", "saia_ask_splunk_question", "saia_optimize_spl"}
+# Account inventory is not part of answering a general data question.
+GENERAL_EXCLUDED_TOOLS = EXCLUDED_TOOLS | {"splunk_get_user_list"}
 
 CATEGORY_TOOL_NAMES = {
     "security": {"splunk_run_query", "splunk_get_metadata", "splunk_get_index_info"},
@@ -108,8 +113,9 @@ CATEGORY_TOOL_NAMES = {
 }
 
 SECURITY_KEYWORDS = [
-    "security", "notable", "brute force", "attack", "malware", "threat", "breach", "intrusion",
-    "suspicious", "audit", "login", "authentication", "unauthorized", "severity", "keylogger", "hack",
+    "security", "notable", "notables", "brute force", "attack", "attacks", "malware", "threat", "threats",
+    "breach", "intrusion", "suspicious", "audit", "login", "logins", "authentication", "unauthorized",
+    "severity", "keylogger", "hack",
 ]
 INFRA_KEYWORDS = [
     "pdu", "power", "cooling", "crac", "temperature", "perfmon", "datacenter", "exchange",
@@ -117,40 +123,52 @@ INFRA_KEYWORDS = [
 ]
 
 
+def _matches_any(text: str, keywords: list[str]) -> bool:
+    return any(re.search(rf"\b{re.escape(keyword)}\b", text, flags=re.IGNORECASE) for keyword in keywords)
+
+
 @log(span_type="agent", name="classifier", params={"agent_type": "classifier"})
 def _classify(user_message: str) -> list[str]:
-    text = user_message.lower()
     categories = []
-    if any(keyword in text for keyword in SECURITY_KEYWORDS):
+    if _matches_any(user_message, SECURITY_KEYWORDS):
         categories.append("security")
-    if any(keyword in text for keyword in INFRA_KEYWORDS):
+    if _matches_any(user_message, INFRA_KEYWORDS):
         categories.append("infra")
     return categories or ["general"]
 
 
 def _scoped_tools(mcp_tools: list[dict], category: str) -> list[dict]:
     allowed = CATEGORY_TOOL_NAMES.get(category)
-    return [t for t in mcp_tools if t["name"] not in EXCLUDED_TOOLS and (allowed is None or t["name"] in allowed)]
+    excluded = EXCLUDED_TOOLS if allowed is not None else GENERAL_EXCLUDED_TOOLS
+    return [t for t in mcp_tools if t["name"] not in excluded and (allowed is None or t["name"] in allowed)]
 
 
-async def _run_worker(user_message: str, mcp_tools: list[dict], provider: str, category: str) -> tuple[str, int]:
+async def _run_worker(
+    user_message: str, mcp_tools: list[dict], provider: str, category: str, history: list[dict]
+) -> tuple[str, int]:
     logger = galileo_context.get_logger_instance()
     system_prompt = CATEGORY_PROMPTS[category]
     scoped_tools = _scoped_tools(mcp_tools, category)
 
     logger.add_agent_span(input=user_message, name=f"{category}_worker", agent_type="react")
     if provider == "openai":
-        result, status_code = await _openai_loop(user_message, scoped_tools, system_prompt)
+        result, status_code = await _openai_loop(user_message, scoped_tools, system_prompt, history)
     elif provider == "gemini":
-        result, status_code = await _gemini_loop(user_message, scoped_tools, system_prompt)
+        result, status_code = await _gemini_loop(user_message, scoped_tools, system_prompt, history)
     else:
-        result, status_code = await _anthropic_loop(user_message, scoped_tools, system_prompt)
+        result, status_code = await _anthropic_loop(user_message, scoped_tools, system_prompt, history)
     logger.conclude(output=result, status_code=status_code)  # closes this worker span
     return result, status_code
 
 
-async def run_agent_turn(user_message: str, mcp_tools: list[dict], provider: str | None = None) -> str:
+async def run_agent_turn(
+    user_message: str,
+    mcp_tools: list[dict],
+    provider: str | None = None,
+    history: list[dict] | None = None,
+) -> str:
     provider = provider or os.environ.get("LLM_PROVIDER", "anthropic")
+    history = list(history or [])
     logger = galileo_context.get_logger_instance()
 
     logger.add_agent_span(input=user_message, name="supervisor", agent_type="supervisor")
@@ -160,42 +178,56 @@ async def run_agent_turn(user_message: str, mcp_tools: list[dict], provider: str
     worker_results: dict[str, str] = {}
     worst_status = 0
     for category in categories:
-        result, status_code = await _run_worker(user_message, mcp_tools, provider, category)
+        result, status_code = await _run_worker(user_message, mcp_tools, provider, category, history)
         worker_results[category] = result
         worst_status = max(worst_status, status_code)
 
     if len(worker_results) == 1:
         final = next(iter(worker_results.values()))
     else:
-        final = await _synthesize(user_message, worker_results, provider)
+        final = await _synthesize(user_message, worker_results, provider, history)
 
     logger.conclude(output=final, status_code=worst_status)  # closes the supervisor span
     return final
 
 
-async def _synthesize(user_message: str, worker_results: dict[str, str], provider: str) -> str:
+async def _synthesize(
+    user_message: str, worker_results: dict[str, str], provider: str, history: list[dict]
+) -> str:
     findings = "\n\n".join(f"## {category.title()} findings\n{text}" for category, text in worker_results.items())
     prompt = f"Original question: {user_message}\n\n{findings}"
+    messages = [*history, {"role": "user", "content": prompt}]
 
     if provider == "openai":
-        response = observability.call_openai([{"role": "user", "content": prompt}], [], SYNTHESIS_SYSTEM_PROMPT)
+        response = observability.call_openai(messages, [], SYNTHESIS_SYSTEM_PROMPT)
         return response.choices[0].message.content or findings
     if provider == "gemini":
-        from google.genai import types
-
-        contents = [types.Content(role="user", parts=[types.Part.from_text(text=prompt)])]
+        contents = _gemini_contents(history, prompt)
         response = observability.call_gemini(contents, [], SYNTHESIS_SYSTEM_PROMPT)
         return response.text or findings
-    response = observability.call_anthropic([{"role": "user", "content": prompt}], [], SYNTHESIS_SYSTEM_PROMPT)
+    response = observability.call_anthropic(messages, [], SYNTHESIS_SYSTEM_PROMPT)
     return "".join(block.text for block in response.content if block.type == "text") or findings
 
 
-async def _openai_loop(user_message: str, mcp_tools: list[dict], system_prompt: str) -> tuple[str, int]:
+def _gemini_contents(history: list[dict], user_message: str) -> list:
+    from google.genai import types
+
+    contents = []
+    for message in history:
+        role = "model" if message["role"] == "assistant" else "user"
+        contents.append(types.Content(role=role, parts=[types.Part.from_text(text=message["content"])]))
+    contents.append(types.Content(role="user", parts=[types.Part.from_text(text=user_message)]))
+    return contents
+
+
+async def _openai_loop(
+    user_message: str, mcp_tools: list[dict], system_prompt: str, history: list[dict]
+) -> tuple[str, int]:
     tools = [
         {"type": "function", "function": {"name": t["name"], "description": t["description"], "parameters": t["input_schema"]}}
         for t in mcp_tools
     ]
-    messages = [{"role": "user", "content": user_message}]
+    messages = [*history, {"role": "user", "content": user_message}]
     seen_calls: set[tuple[str, str]] = set()
 
     for _ in range(MAX_TURNS):
@@ -220,9 +252,11 @@ async def _openai_loop(user_message: str, mcp_tools: list[dict], system_prompt: 
     return _turn_limit_message(), 1
 
 
-async def _anthropic_loop(user_message: str, mcp_tools: list[dict], system_prompt: str) -> tuple[str, int]:
+async def _anthropic_loop(
+    user_message: str, mcp_tools: list[dict], system_prompt: str, history: list[dict]
+) -> tuple[str, int]:
     tools = [{"name": t["name"], "description": t["description"], "input_schema": t["input_schema"]} for t in mcp_tools]
-    messages = [{"role": "user", "content": user_message}]
+    messages = [*history, {"role": "user", "content": user_message}]
     seen_calls: set[tuple[str, str]] = set()
 
     for _ in range(MAX_TURNS):
@@ -249,13 +283,15 @@ async def _anthropic_loop(user_message: str, mcp_tools: list[dict], system_promp
     return _turn_limit_message(), 1
 
 
-async def _gemini_loop(user_message: str, mcp_tools: list[dict], system_prompt: str) -> tuple[str, int]:
+async def _gemini_loop(
+    user_message: str, mcp_tools: list[dict], system_prompt: str, history: list[dict]
+) -> tuple[str, int]:
     from google.genai import types
 
     tools = [
         {"name": t["name"], "description": t["description"], "parameters_json_schema": t["input_schema"]} for t in mcp_tools
     ]
-    contents = [types.Content(role="user", parts=[types.Part.from_text(text=user_message)])]
+    contents = _gemini_contents(history, user_message)
     seen_calls: set[tuple[str, str]] = set()
 
     for _ in range(MAX_TURNS):

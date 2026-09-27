@@ -1,7 +1,7 @@
 """Check whether .env has everything needed to participate in the workshop.
 
 Run this after filling in .env to get a readiness report — at least one LLM
-key matching LLM_PROVIDER, a Galileo API key, and a Splunk instance URL +
+key matching LLM_PROVIDER, a Splunk Agent Observability (Galileo) API key, and a Splunk instance URL +
 MCP token — instead of discovering a missing value later mid-session.
 """
 
@@ -59,7 +59,7 @@ def main():
             key_present[provider],
         )
 
-    print("\nGalileo")
+    print("\nSplunk Agent Observability (Galileo)")
     all_ok &= check("GALILEO_API_KEY is filled in", bool(os.environ.get("GALILEO_API_KEY", "").strip()))
 
     print("\nSplunk MCP")

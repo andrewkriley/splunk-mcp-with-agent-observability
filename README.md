@@ -1,47 +1,64 @@
-# AI Builders Workshop: Splunk + MCP + Galileo
+# splunk-mcp-with-agent-observability
 
-A hands-on workshop for building an AI agent application that queries live data
-from a Splunk instance via [MCP](https://modelcontextprotocol.io) and reports
-agent observability signals to [Galileo](https://app.galileo.ai).
+## Overview
+
+A hands-on project for building an AI agent that queries live Splunk data
+through [MCP](https://modelcontextprotocol.io) and reports agent observability
+signals to Splunk Agent Observability (Galileo).
+
+Dependencies:
+
+1. [Splunk Show workshop](https://show.splunk.com/template/946/)
+2. Splunk Agent Observability (Galileo)
+3. An inference provider (Anthropic, OpenAI, OpenAI spec)
 
 ## What you'll build
 
 A small web app with a chat interface, backed by an AI agent that:
 
-1. Takes a user's question in the chat UI.
-2. Classifies the question (security / infra / general — a fast keyword
-   heuristic, no extra LLM call) and hands it to a scoped worker agent with
-   a matching system prompt and tool subset.
-3. That worker calls an LLM API (Anthropic, OpenAI, or Gemini — your own
+1. Takes a user's question in the chat UI. Earlier user and assistant turns
+   from the same page load are included with the new question, so a follow-up
+   can refer to the previous answer. Reloading the page starts a fresh
+   conversation.
+2. Classifies the question with a keyword heuristic (whole words, no extra
+   LLM call). A question can match security, infra, both, or neither
+   (general). Each match gets its own worker with a scoped system prompt and
+   tool subset. When more than one category matches, a synthesis call with
+   no tools combines their findings into one answer.
+3. Each worker calls an LLM API (Anthropic, OpenAI, or Gemini — your own
    key) to reason about the question. A dropdown in the chat UI switches
    between whichever of the three you have a key for, per turn.
 4. Lets the LLM call tools exposed by a **Splunk MCP server** to query your
    Splunk instance for the data it needs, with two safety nets against a
-   stuck agent: a round cap, and a guard that stops on a repeated identical
-   tool call.
-5. Traces each turn (prompts, tool calls, responses) to **Galileo** for
+   stuck agent: a round cap, and a guard that stops if the model repeats an
+   identical tool call (same tool, same arguments) at any point in that
+   worker's turn.
+5. Traces each turn (prompts, tool calls, responses) to **Splunk Agent Observability (Galileo)** for
    agent observability, structured as `supervisor → [classifier, worker →
-   [llm, tool, ...]]` agent spans — every turn in one browser conversation
-   is grouped under a single Galileo session, so a full back-and-forth
+   [llm, tool, ...], …]` agent spans — every turn in one browser conversation
+   is grouped under a single Splunk Agent Observability (Galileo) session, so a full back-and-forth
    shows up as one session containing multiple traces.
 
 ```
  Browser (chat UI)
        │
        ▼
-   FastAPI app ──► supervisor agent ──► classifier agent (picks a category)
+   FastAPI app ──► supervisor agent ──► classifier (keyword categories)
        │                 │
        │                 ▼
-       │           worker agent ──► LLM API (Anthropic / OpenAI / Gemini)
+       │           worker agent(s) ──► LLM API (Anthropic / OpenAI / Gemini)
        │                 │                     │
        │                 │                     ▼ (tool calls)
        │                 └───────────► Splunk MCP server ──► your Splunk instance
+       │                 │
+       │                 ▼ (when more than one category matched)
+       │           synthesis LLM call (no tools)
        │
        ▼
-    Galileo (nested trace: supervisor → classifier + worker → llm/tool spans)
+    Splunk Agent Observability (Galileo) (nested trace: supervisor → classifier + worker(s) → llm/tool spans)
 ```
 
-Galileo only ships a native wrapper for OpenAI (`galileo.openai`, drop-in,
+Splunk Agent Observability (Galileo) only ships a native wrapper for OpenAI (`galileo.openai`, drop-in,
 auto-logs every call). Anthropic and Gemini calls build their span by hand
 via `GalileoLogger.add_llm_span(...)` for full control over what gets
 logged — the generic `@log` decorator dumps every function argument
@@ -52,7 +69,7 @@ calls still use `@log(span_type="tool")`, which doesn't have that problem.
 A working reference app ships in [`app/`](./app) (`uvicorn app.main:app
 --reload`) so everyone has something running by the end of the session. If
 you're comfortable, you're encouraged to build your own version from scratch
-using the same three building blocks (LLM API, MCP client, Galileo).
+using the same three building blocks (LLM API, MCP client, Splunk Agent Observability (Galileo)).
 
 ## Data available via Splunk MCP
 
@@ -108,7 +125,7 @@ creating a Python virtual environment and installing the rest.
 
 ### Accounts & keys
 
-- A [Galileo](https://app.galileo.ai/sign-up) account (free to sign up)
+- A [Splunk Agent Observability (Galileo)](https://app.galileo.ai/sign-up) account (free to sign up)
 - Your own Anthropic, OpenAI, or Gemini API key (**not** a subscription tool
   like Claude Code/Claude.ai or Cursor/ChatGPT Plus — the app needs a key it
   can call directly). No key yet? [Google's Gemini API has a free tier](https://ai.google.dev/gemini-api/docs/pricing)
@@ -136,6 +153,6 @@ workshop, from cloning the repo through to a running app.
 | `app/main.py` | FastAPI app — `/chat`, `/config` (`uvicorn app.main:app --reload` to run it) |
 | `app/agent.py` | Per-provider LLM <-> Splunk MCP tool-calling loop |
 | `app/mcp_client.py` | Splunk MCP connection (self-signed cert handled) |
-| `app/observability.py` | Galileo tracing (native OpenAI wrapper / `@log` decorator, sessions) |
+| `app/observability.py` | Splunk Agent Observability (Galileo) tracing (native OpenAI wrapper / `@log` decorator, sessions) |
 | `app/static/index.html` | The chat UI, with a provider switcher |
 | `.github/workflows/gitleaks.yml` | CI check that scans commits for leaked secrets |

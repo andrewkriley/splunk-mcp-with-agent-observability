@@ -19,13 +19,20 @@ it connects directly.
   providers with an API key set in `.env` are listed; `POST /chat` takes
   `{"message": "...", "conversation_id": "...", "provider": "..."}` (provider
   optional, falls back to `LLM_PROVIDER`) and returns `{"reply": "..."}`. An
-  unconfigured `provider` is rejected with `400`, not a crash.
+  unconfigured `provider` is rejected with `400`, not a crash. A blank or
+  over-long message is rejected with `422`. The handler waits at most 180
+  seconds, then returns `504`. Other failures return `502` with a short
+  message (secret values redacted) that the chat page displays.
 - **`static/index.html`** — a minimal HTML/JS chat page, no build step. A
   provider dropdown in the header is populated from `/config` (so it never
   offers a provider with no key) and sent with every message, letting you
   switch anthropic/openai/gemini per turn without restarting the app.
   Generates a random `conversation_id` once per page load and sends it with
-  every message, so a reload starts a fresh Galileo session.
+  every message. The server keeps the last 8 user/assistant turns for that
+  id and sends them with the next question, so a follow-up can refer to the
+  previous answer. Search stays disabled until the provider list loads, and
+  again while a request is in flight. A reload
+  starts a fresh Splunk Agent Observability (Galileo) session and a fresh history.
 - **`mcp_client.py`** — connects to the Splunk MCP server at
   `<SPLUNK_INSTANCE_URL>:8089/services/mcp` (see `scripts/setup_mcp.py` for
   how that URL is derived) using the `mcp` Python SDK, authenticating with
@@ -36,44 +43,52 @@ it connects directly.
   - A **supervisor** agent span (`agent_type="supervisor"`) wraps the whole
     turn.
   - A **classifier** agent span (`agent_type="classifier"`) inside it picks
-    a category — `security`, `infra`, or `general` — via a fast keyword
-    heuristic (not an LLM call, to keep this deterministic and free of
-    extra API cost/latency). That category selects a scoped system prompt
-    (e.g. the security prompt knows `oidemo_notable` is `sourcetype=stash`
-    with `severity` embedded as literal uppercase text like `severity=HIGH`,
-    not a normalized field) and a scoped tool subset — the `saia_*` tools
-    are excluded from every category, since they reliably return server
-    errors on this instance (confirmed).
-  - A **worker** agent span (`agent_type="react"`) then runs the actual
-    tool-calling loop for `LLM_PROVIDER` (anthropic/openai/gemini) with that
-    scoped prompt/tools: call the LLM, execute whatever tool call it asks
-    for, feed the result back, repeat until it returns a final answer.
+    one or more categories — `security`, `infra`, or, when nothing matches,
+    `general` — via a fast whole-word keyword heuristic (not an LLM call, to
+    keep this deterministic and free of extra API cost/latency). `"power"`
+    matches a power question and does not match `"powershell"`. Each matched
+    category selects a scoped system prompt (e.g. the security prompt knows
+    `oidemo_notable` is `sourcetype=stash` with `severity` embedded as
+    literal uppercase text like `severity=HIGH`, not a normalized field) and
+    a scoped tool subset. The `saia_*` tools are excluded from every
+    category, since they reliably return server errors on this instance
+    (confirmed). `splunk_get_user_list` is also withheld from `general`, the
+    path a question takes when no keyword matches.
+  - A **worker** agent span (`agent_type="react"`) per matched category then
+    runs the tool-calling loop for the selected provider
+    (anthropic/openai/gemini) with that scoped prompt and tools, plus the
+    stored conversation history: call the LLM, execute whatever tool call it
+    asks for, feed the result back, repeat until it returns a final answer.
+    When more than one category matched, a synthesis LLM call with no tools
+    combines the workers' findings into the reply the user sees.
 
-  In Galileo this renders as `trace -> agent(supervisor) ->
-  [agent(classifier), agent(react) -> [llm, tool, llm, ...]]` (verified
-  against the real backend).
+  In Splunk Agent Observability (Galileo) this renders as `trace -> agent(supervisor) ->
+  [agent(classifier), agent(react) -> [llm, tool, llm, ...], …]` (verified
+  against the real backend). A multi-category turn adds a synthesis `llm`
+  span after the workers.
 
   Two independent safety nets inside each worker loop, since a real LLM can
   get stuck: `MAX_TURNS` caps the round count (8), and a repeated-call guard
-  stops immediately if the model calls the exact same tool with the exact
-  same arguments twice in a row — a common real loop failure mode, faster to
-  catch than waiting for the cap (verified with mocked responses: trips
-  after exactly 2 calls, not 8). Either one tripping sets `status_code=1` on
+  stops if the model calls the exact same tool with the exact same arguments
+  again at any point in that worker's turn — a common real loop failure
+  mode, faster to catch than waiting for the cap. The guard is a set of
+  calls already made, so the repeat does not have to be the immediately
+  previous call. Either one tripping sets `status_code=1` on
   the worker's (and supervisor's) agent span when it concludes, so a stuck
-  turn is visible/filterable in Galileo instead of just a silent fallback
+  turn is visible/filterable in Splunk Agent Observability (Galileo) instead of just a silent fallback
   message in the chat.
 
   The LLM calls (`call_openai`/`call_anthropic`/`call_gemini`) are plain
   sync functions, called directly. Two things that look like obvious
   improvements were tried and both regressed:
-  - `asyncio.to_thread` — confirmed broken: it resolves Galileo's logger to
+  - `asyncio.to_thread` — confirmed broken: it resolves Splunk Agent Observability (Galileo)'s logger to
     a different object with no active trace, silently dropping every LLM
     span.
   - Each provider's async client (`AsyncOpenAI`/`AsyncAnthropic`/`.aio`),
     awaited in-line — broke OpenAI outright: `galileo.openai`'s wrapper only
     patches the sync `Completions.create` (confirmed by reading its
     `OPENAI_CLIENT_METHODS` list), so the async client bypasses it entirely
-    and forwards Galileo's `name=` kwarg straight to the real API, which
+    and forwards Splunk Agent Observability (Galileo)'s `name=` kwarg straight to the real API, which
     rejects it (`TypeError: AsyncCompletions.create() got an unexpected
     keyword argument 'name'` — hit as a live 500 in a running app). It also
     didn't fix the missing-span issue below for Anthropic/Gemini anyway.
@@ -81,7 +96,7 @@ it connects directly.
   request — an acceptable tradeoff for this single-user demo.
 
   **Known unresolved issue:** a real multi-round conversation still tends to
-  lose most (not all) `llm` spans in Galileo — every `tool` span and the
+  lose most (not all) `llm` spans in Splunk Agent Observability (Galileo) — every `tool` span and the
   trace's own input/output are unaffected, and this is purely an
   observability gap, not a functional bug (the chat app's answers are
   correct regardless). Extensively investigated — bounding the logged
@@ -91,10 +106,10 @@ it connects directly.
   identical code path never reproduced it at all. See the `KNOWN ISSUE`
   comment in `observability.py` for the full trail. If you see this during
   the workshop, it's not something wrong with your setup.
-- **`observability.py`** — OpenAI calls go through Galileo's native
+- **`observability.py`** — OpenAI calls go through Splunk Agent Observability (Galileo)'s native
   `galileo.openai` wrapper (auto-logs, no decorator needed), passing
   `name="openai"` so its spans are labeled by provider instead of the
-  wrapper's generic default (`"llm"`) — that kwarg is captured by Galileo
+  wrapper's generic default (`"llm"`) — that kwarg is captured by Splunk Agent Observability (Galileo)
   for the span label and stripped before the real API call, never sent to
   OpenAI. Anthropic and Gemini calls build their span by hand via
   `GalileoLogger.add_llm_span(...)` instead of the generic
@@ -107,11 +122,11 @@ it connects directly.
   gives full control: `input` is a clean `[{"role": "system", ...}, ...]`
   list matching OpenAI's shape, `output` is flattened to readable text, and
   `tools`/token counts/duration are passed explicitly (the `tools` list
-  matters — without it, Galileo's `tool_selection_quality` metric can't run
+  matters — without it, Splunk Agent Observability (Galileo)'s `tool_selection_quality` metric can't run
   and reports "not applicable"). Every Splunk MCP tool call still uses
   `@log(span_type="tool")`, which doesn't have this problem since its
   input/output are already simple strings. `run_traced_turn` maps each
-  `conversation_id` to a Galileo session (created once via `start_session`,
+  `conversation_id` to a Splunk Agent Observability (Galileo) session (created once via `start_session`,
   cached), explicitly calls `start_trace(input=user_message)` /
   `conclude(output=result)` so the trace shows the real question and answer
   rather than an arbitrary child span's input/output, and wraps it all in
@@ -120,5 +135,5 @@ it connects directly.
   session.
 
 If you're building your own version instead of using this one, this is the
-same build order: MCP client → LLM adapter/agent loop → Galileo tracing →
+same build order: MCP client → LLM adapter/agent loop → Splunk Agent Observability (Galileo) tracing →
 chat UI.

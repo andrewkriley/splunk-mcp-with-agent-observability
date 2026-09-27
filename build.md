@@ -7,22 +7,22 @@ you're using) and let it run the commands for you.
 ## 1. Clone the repo
 
 ```
-git clone https://github.com/andrewkriley/cl-ai-builders.git
-cd cl-ai-builders
+git clone https://github.com/andrewkriley/splunk-mcp-with-agent-observability.git
+cd splunk-mcp-with-agent-observability
 ```
 
-## 2. Sign up for Galileo
+## 2. Sign up for Splunk Agent Observability (Galileo)
 
 1. Go to https://app.galileo.ai/sign-up and create an account.
 2. Verify your email address (check your inbox for a verification link).
 3. Log in at https://app.galileo.ai and confirm you can reach your dashboard.
 
-## 3. Create a Galileo API key
+## 3. Create a Splunk Agent Observability (Galileo) API key
 
-1. In the Galileo console, go to your account/API key settings.
+1. In the Splunk Agent Observability (Galileo) console, go to your account/API key settings.
 2. Create a new API key and copy it somewhere safe — it's only shown once.
 3. Note (or create) a project name you'll use for this workshop, e.g.
-   `ai-builders-workshop`.
+   `splunk-mcp-with-agent-observability`.
 
 ## 4. Set up your `.env` file
 
@@ -30,11 +30,11 @@ cd cl-ai-builders
 cp .env.example .env
 ```
 
-Open `.env` and fill in the Galileo section:
+Open `.env` and fill in the Splunk Agent Observability (Galileo) section:
 
 ```
 GALILEO_API_KEY=<the key you just created>
-GALILEO_PROJECT=ai-builders-workshop
+GALILEO_PROJECT=splunk-mcp-with-agent-observability
 GALILEO_LOG_STREAM=default
 ```
 
@@ -134,7 +134,7 @@ python scripts/check_env.py
 ```
 
 This confirms you have at least one LLM key set and matching `LLM_PROVIDER`,
-a Galileo API key, and a Splunk instance URL + MCP token — before you go any
+a Splunk Agent Observability (Galileo) API key, and a Splunk instance URL + MCP token — before you go any
 further.
 
 ## 9. Wire up your Splunk MCP connection
@@ -177,7 +177,7 @@ chat header to switch between them and compare answers/traces side by side.
 
 See [`app/README.md`](./app/README.md) for how it's built if you want to
 modify it or build your own version from the same pieces (LLM adapter, MCP
-client, Galileo tracing, chat UI).
+client, Splunk Agent Observability (Galileo) tracing, chat UI).
 
 ## Troubleshooting
 
@@ -187,7 +187,7 @@ client, Galileo tracing, chat UI).
   then delete and recreate `.venv` using a 3.11+ interpreter as shown in
   [step 7](#7-create-a-virtual-environment-and-install-dependencies).
 - **Not sure what's missing from `.env`** — run `python scripts/check_env.py`
-  for a full readiness report (LLM key/provider match, Galileo, Splunk MCP).
+  for a full readiness report (LLM key/provider match, Splunk Agent Observability (Galileo), Splunk MCP).
 - **`scripts/setup_mcp.py` reports missing env vars** — double check `.env`
   has `SPLUNK_INSTANCE_URL` and `SPLUNK_MCP_TOKEN` filled in (not left blank
   from `.env.example`), and that `SPLUNK_INSTANCE_URL` is just the base URL
@@ -217,20 +217,20 @@ client, Galileo tracing, chat UI).
   a Cloud project access issue, not a bad key. Create a new key at
   https://aistudio.google.com/apikey while signed in with a plain gmail.com
   account instead of a legacy/grandfathered Google Workspace account.
-- **No traces show up in the Galileo dashboard** — confirm `GALILEO_API_KEY`
+- **No traces show up in the Splunk Agent Observability (Galileo) dashboard** — confirm `GALILEO_API_KEY`
   and `GALILEO_PROJECT` are set, and that the app actually ran a turn (traces
   only appear after a completed request).
 - **Metrics (e.g. `groundedness`, `tool_selection_quality`) stay stuck on
   "queued"/"pending" on every trace, even old ones** — this isn't caused by
-  the app or `.env`. Confirmed via the Galileo API: the account's scoring
+  the app or `.env`. Confirmed via the Splunk Agent Observability (Galileo) API: the account's scoring
   integration (Settings → Integrations) shows green/healthy, and every trace
   correctly has both metrics attached, but the scoring jobs never complete
-  regardless of how long you wait. This points to a Galileo backend issue
+  regardless of how long you wait. This points to a Splunk Agent Observability (Galileo) backend issue
   (stuck scoring queue, or automated scoring throttled on some account
   tiers), not something fixable from this repo. It doesn't block the
   workshop — traces, spans, and sessions all log and display correctly;
   only the auto-computed quality scores are affected. If it matters for your
-  session, check Galileo's status page or contact their support.
+  session, check Splunk Agent Observability (Galileo)'s status page or contact their support.
 - **A multi-round conversation's trace is missing some of its `llm` spans**
   (tool spans and the trace's own input/output all look correct, just some
   LLM calls in the middle are absent) — a known, unresolved issue, not
@@ -238,7 +238,7 @@ client, Galileo tracing, chat UI).
   `KNOWN ISSUE` comment in `app/observability.py`): bounding logged payload
   size, switching to each provider's async client, flushing after every
   span instead of once at the end, and `mode="distributed"` were all tried
-  and none fixed it. Purely a Galileo observability gap — the chat app's
+  and none fixed it. Purely a Splunk Agent Observability (Galileo) observability gap — the chat app's
   answers remain correct regardless. (The async-client attempt was reverted
   outright, separately from this issue — it broke OpenAI, since
   `galileo.openai`'s wrapper doesn't patch the async client. The app now

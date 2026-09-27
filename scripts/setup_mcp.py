@@ -65,7 +65,7 @@ def check_connection(mcp_url: str, token: str):
         mcp_url,
         token,
         "initialize",
-        {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "ai-builders-workshop", "version": "0.1"}},
+        {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "splunk-mcp-with-agent-observability", "version": "0.1"}},
         request_id=1,
     )["serverInfo"]
 
