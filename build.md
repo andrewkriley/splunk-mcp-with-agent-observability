@@ -36,7 +36,13 @@ Open `.env` and fill in the Splunk Agent Observability (Galileo) section:
 GALILEO_API_KEY=<the key you just created>
 GALILEO_PROJECT=splunk-mcp-with-agent-observability
 GALILEO_LOG_STREAM=default
+GALILEO_CONSOLE_URL=
 ```
+
+Leave `GALILEO_CONSOLE_URL` blank to use the default console, `https://app.galileo.ai`.
+To send traces to another Splunk Agent Observability (Galileo) instance, set the
+full console URL, for example `https://console.multitenant.galileocloud.io`.
+The SDK then calls the matching API host (`console` in the hostname becomes `api`).
 
 ## 5. Get your Splunk details from the facilitator
 

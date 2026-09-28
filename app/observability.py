@@ -18,8 +18,10 @@ import json
 import os
 import time
 from collections import OrderedDict
+from urllib.parse import urlsplit
 
 from galileo import galileo_context, log, start_session
+from galileo.constants import DEFAULT_CONSOLE_URL
 
 from app import mcp_client
 
@@ -54,6 +56,29 @@ def remember_turn(conversation_id: str, user_message: str, reply: str) -> None:
         del turns[:overflow]
     while len(_history) > MAX_CONVERSATIONS:
         _history.popitem(last=False)
+
+
+def galileo_console_url() -> str:
+    """Console to log to. Blank GALILEO_CONSOLE_URL keeps the SDK default."""
+    configured = os.environ.get("GALILEO_CONSOLE_URL", "").strip()
+    if not configured:
+        return str(DEFAULT_CONSOLE_URL).rstrip("/")
+
+    value = configured if "://" in configured else f"https://{configured}"
+    parsed = urlsplit(value)
+    if parsed.scheme not in {"https", "http"} or not parsed.hostname:
+        raise ValueError("GALILEO_CONSOLE_URL must be an http(s) URL with a host")
+    if parsed.username or parsed.password:
+        raise ValueError("GALILEO_CONSOLE_URL must not include a username or password")
+    return value.rstrip("/")
+
+
+def apply_galileo_console_url() -> str:
+    """Publish a validated override before the SDK reads GALILEO_CONSOLE_URL."""
+    url = galileo_console_url()
+    if os.environ.get("GALILEO_CONSOLE_URL", "").strip():
+        os.environ["GALILEO_CONSOLE_URL"] = url
+    return url
 
 
 def _galileo_session_id(conversation_id: str) -> str:
@@ -239,6 +264,7 @@ async def call_splunk_tool(tool_name: str, arguments: dict) -> str:
 async def run_traced_turn(user_message: str, conversation_id: str, provider: str | None = None) -> str:
     from app.agent import run_agent_turn
 
+    apply_galileo_console_url()
     with galileo_context(
         project=os.environ.get("GALILEO_PROJECT", "splunk-mcp-with-agent-observability"),
         log_stream=os.environ.get("GALILEO_LOG_STREAM", "default"),
