@@ -25,9 +25,11 @@ A small web app with a chat interface, backed by an AI agent that:
    (general). Each match gets its own worker with a scoped system prompt and
    tool subset. When more than one category matches, a synthesis call with
    no tools combines their findings into one answer.
-3. Each worker calls an LLM API (Anthropic, OpenAI, or Gemini — your own
-   key) to reason about the question. A dropdown in the chat UI switches
-   between whichever of the three you have a key for, per turn.
+3. Each worker calls an LLM API (Anthropic, OpenAI, Gemini, or an OpenAI-spec
+   endpoint — your own key) to reason about the question. A dropdown in the
+   chat UI switches between whichever of those you have configured, per turn.
+   For an OpenAI-spec endpoint, a second dropdown lists the models from
+   `OPENAI_SPEC_MODELS`.
 4. Lets the LLM call tools exposed by a **Splunk MCP server** to query your
    Splunk instance for the data it needs, with two safety nets against a
    stuck agent: a round cap, and a guard that stops if the model repeats an

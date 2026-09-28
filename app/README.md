@@ -16,17 +16,24 @@ it connects directly.
 
 - **`main.py`** — FastAPI app. `GET /` serves `static/index.html`; `GET
   /config` returns `{"providers": [...], "default_provider": "..."}` — only
-  providers with an API key set in `.env` are listed; `POST /chat` takes
-  `{"message": "...", "conversation_id": "...", "provider": "..."}` (provider
-  optional, falls back to `LLM_PROVIDER`) and returns `{"reply": "..."}`. An
-  unconfigured `provider` is rejected with `400`, not a crash. A blank or
+  providers with an API key set in `.env` are listed, plus `openai-spec` when
+  `OPENAI_SPEC_API_KEY`, `OPENAI_SPEC_BASE_URL`, and `OPENAI_SPEC_MODELS` are
+  all set. `openai_spec_models` in that response is the model list the page
+  shows in the header dropdown. `POST /chat` takes
+  `{"message": "...", "conversation_id": "...", "provider": "...", "model": "..."}`
+  (provider optional, falls back to `LLM_PROVIDER`; `model` is the OpenAI-spec
+  model selected in the UI) and returns `{"reply": "..."}`. An
+  unconfigured `provider`, or an OpenAI-spec `model` that is not in
+  `OPENAI_SPEC_MODELS`, is rejected with `400`, not a crash. A blank or
   over-long message is rejected with `422`. The handler waits at most 180
   seconds, then returns `504`. Other failures return `502` with a short
   message (secret values redacted) that the chat page displays.
 - **`static/index.html`** — a minimal HTML/JS chat page, no build step. A
   provider dropdown in the header is populated from `/config` (so it never
   offers a provider with no key) and sent with every message, letting you
-  switch anthropic/openai/gemini per turn without restarting the app.
+  switch anthropic/openai/gemini/openai-spec per turn without restarting the
+  app. Choosing OpenAI spec reveals the model dropdown filled from
+  `openai_spec_models`, and the selected model is sent with the message.
   Generates a random `conversation_id` once per page load and sends it with
   every message. The server keeps the last 8 user/assistant turns for that
   id and sends them with the next question, so a follow-up can refer to the
@@ -110,7 +117,8 @@ it connects directly.
   `GALILEO_CONSOLE_URL` is set (for example
   `https://console.multitenant.galileocloud.io`). OpenAI calls go through Splunk Agent Observability (Galileo)'s native
   `galileo.openai` wrapper (auto-logs, no decorator needed), passing
-  `name="openai"` so its spans are labeled by provider instead of the
+  `name="openai"` (or `name="openai-spec"` for an OpenAI-compatible endpoint)
+  so its spans are labeled by provider instead of the
   wrapper's generic default (`"llm"`) — that kwarg is captured by Splunk Agent Observability (Galileo)
   for the span label and stripped before the real API call, never sent to
   OpenAI. Anthropic and Gemini calls build their span by hand via

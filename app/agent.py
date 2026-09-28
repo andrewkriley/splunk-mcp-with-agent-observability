@@ -144,15 +144,26 @@ def _scoped_tools(mcp_tools: list[dict], category: str) -> list[dict]:
 
 
 async def _run_worker(
-    user_message: str, mcp_tools: list[dict], provider: str, category: str, history: list[dict]
+    user_message: str,
+    mcp_tools: list[dict],
+    provider: str,
+    category: str,
+    history: list[dict],
+    model: str | None = None,
 ) -> tuple[str, int]:
     logger = galileo_context.get_logger_instance()
     system_prompt = CATEGORY_PROMPTS[category]
     scoped_tools = _scoped_tools(mcp_tools, category)
 
     logger.add_agent_span(input=user_message, name=f"{category}_worker", agent_type="react")
-    if provider == "openai":
-        result, status_code = await _openai_loop(user_message, scoped_tools, system_prompt, history)
+    if provider in {"openai", "openai-spec"}:
+        result, status_code = await _openai_loop(
+            user_message,
+            scoped_tools,
+            system_prompt,
+            history,
+            client_settings=observability.openai_client_settings(provider, model),
+        )
     elif provider == "gemini":
         result, status_code = await _gemini_loop(user_message, scoped_tools, system_prompt, history)
     else:
@@ -166,6 +177,7 @@ async def run_agent_turn(
     mcp_tools: list[dict],
     provider: str | None = None,
     history: list[dict] | None = None,
+    model: str | None = None,
 ) -> str:
     provider = provider or os.environ.get("LLM_PROVIDER", "anthropic")
     history = list(history or [])
@@ -178,28 +190,34 @@ async def run_agent_turn(
     worker_results: dict[str, str] = {}
     worst_status = 0
     for category in categories:
-        result, status_code = await _run_worker(user_message, mcp_tools, provider, category, history)
+        result, status_code = await _run_worker(user_message, mcp_tools, provider, category, history, model)
         worker_results[category] = result
         worst_status = max(worst_status, status_code)
 
     if len(worker_results) == 1:
         final = next(iter(worker_results.values()))
     else:
-        final = await _synthesize(user_message, worker_results, provider, history)
+        final = await _synthesize(user_message, worker_results, provider, history, model)
 
     logger.conclude(output=final, status_code=worst_status)  # closes the supervisor span
     return final
 
 
 async def _synthesize(
-    user_message: str, worker_results: dict[str, str], provider: str, history: list[dict]
+    user_message: str,
+    worker_results: dict[str, str],
+    provider: str,
+    history: list[dict],
+    model: str | None = None,
 ) -> str:
     findings = "\n\n".join(f"## {category.title()} findings\n{text}" for category, text in worker_results.items())
     prompt = f"Original question: {user_message}\n\n{findings}"
     messages = [*history, {"role": "user", "content": prompt}]
 
-    if provider == "openai":
-        response = observability.call_openai(messages, [], SYNTHESIS_SYSTEM_PROMPT)
+    if provider in {"openai", "openai-spec"}:
+        response = observability.call_openai(
+            messages, [], SYNTHESIS_SYSTEM_PROMPT, **observability.openai_client_settings(provider, model)
+        )
         return response.choices[0].message.content or findings
     if provider == "gemini":
         contents = _gemini_contents(history, prompt)
@@ -221,7 +239,11 @@ def _gemini_contents(history: list[dict], user_message: str) -> list:
 
 
 async def _openai_loop(
-    user_message: str, mcp_tools: list[dict], system_prompt: str, history: list[dict]
+    user_message: str,
+    mcp_tools: list[dict],
+    system_prompt: str,
+    history: list[dict],
+    client_settings: dict | None = None,
 ) -> tuple[str, int]:
     tools = [
         {"type": "function", "function": {"name": t["name"], "description": t["description"], "parameters": t["input_schema"]}}
@@ -231,7 +253,7 @@ async def _openai_loop(
     seen_calls: set[tuple[str, str]] = set()
 
     for _ in range(MAX_TURNS):
-        response = observability.call_openai(messages, tools, system_prompt)
+        response = observability.call_openai(messages, tools, system_prompt, **(client_settings or {}))
         message = response.choices[0].message
         if not message.tool_calls:
             if not message.content:

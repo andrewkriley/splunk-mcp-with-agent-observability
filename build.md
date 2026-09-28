@@ -91,15 +91,23 @@ Fill in the LLM section of `.env`, setting `LLM_PROVIDER` to match whichever
 key you got:
 
 ```
-LLM_PROVIDER=anthropic          # anthropic | openai | gemini
+LLM_PROVIDER=anthropic          # anthropic | openai | gemini | openai-spec
 ANTHROPIC_API_KEY=<your key>    # if using Anthropic
 OPENAI_API_KEY=<your key>       # if using OpenAI
 GEMINI_API_KEY=<your key>       # if using Gemini
+OPENAI_SPEC_API_KEY=<your key>  # if using an OpenAI-spec endpoint
+OPENAI_SPEC_BASE_URL=https://your-endpoint.example/v1
+OPENAI_SPEC_MODELS=model-a, model-b
 ```
 
+An OpenAI-spec endpoint is any server that speaks `/chat/completions` (vLLM,
+Ollama, LiteLLM, or a private gateway). It is offered in the chat UI only
+when the key, base URL, and model list are all set. The models from
+`OPENAI_SPEC_MODELS` show in a dropdown next to the provider.
+
 Got more than one key? Fill in all of them — the chat app has a provider
-dropdown that lets you switch between anthropic/openai/gemini per message,
-without editing `.env` or restarting anything.
+dropdown that lets you switch between anthropic/openai/gemini/openai-spec per
+message, without editing `.env` or restarting anything.
 
 ## 7. Create a virtual environment and install dependencies
 

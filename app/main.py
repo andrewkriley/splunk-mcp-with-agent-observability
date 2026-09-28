@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field, field_validator
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
-from app.observability import run_traced_turn  # noqa: E402 — import after load_dotenv sets env vars
+from app.observability import openai_spec_config, run_traced_turn  # noqa: E402 — import after load_dotenv sets env vars
 
 app = FastAPI(title="splunk-mcp-with-agent-observability")
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
@@ -31,6 +31,7 @@ _SECRET_ENV_VARS = (
     "OPENAI_API_KEY",
     "GEMINI_API_KEY",
     "GALILEO_API_KEY",
+    "OPENAI_SPEC_API_KEY",
 )
 MAX_MESSAGE_CHARS = 4000
 CHAT_TIMEOUT_SECONDS = 180
@@ -40,6 +41,7 @@ class ChatRequest(BaseModel):
     message: str = Field(max_length=MAX_MESSAGE_CHARS)
     conversation_id: str = Field(min_length=1, max_length=128)
     provider: str | None = None
+    model: str | None = Field(default=None, max_length=128)
 
     @field_validator("message")
     @classmethod
@@ -70,10 +72,25 @@ class ChatResponse(BaseModel):
 class ConfigResponse(BaseModel):
     providers: list[str]
     default_provider: str
+    openai_spec_models: list[str] = []
 
 
 def _configured_providers() -> list[str]:
-    return [p for p, env_var in PROVIDER_KEY_ENV_VARS.items() if os.environ.get(env_var, "").strip()]
+    providers = [p for p, env_var in PROVIDER_KEY_ENV_VARS.items() if os.environ.get(env_var, "").strip()]
+    try:
+        if openai_spec_config() is not None:
+            providers.append("openai-spec")
+    except ValueError:
+        pass
+    return providers
+
+
+def _openai_spec_models() -> list[str]:
+    try:
+        spec = openai_spec_config()
+    except ValueError:
+        return []
+    return list(spec["models"]) if spec else []
 
 
 @app.get("/")
@@ -89,7 +106,11 @@ async def config():
 
     env_default = os.environ.get("LLM_PROVIDER", "").strip()
     default_provider = env_default if env_default in providers else providers[0]
-    return ConfigResponse(providers=providers, default_provider=default_provider)
+    return ConfigResponse(
+        providers=providers,
+        default_provider=default_provider,
+        openai_spec_models=_openai_spec_models(),
+    )
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -97,9 +118,18 @@ async def chat(request: ChatRequest):
     if request.provider and request.provider not in _configured_providers():
         raise HTTPException(400, f"'{request.provider}' has no API key configured in .env")
 
+    model = request.model
+    if request.provider == "openai-spec":
+        allowed = _openai_spec_models()
+        if model and model not in allowed:
+            raise HTTPException(400, f"'{model}' is not one of the configured OpenAI-spec models")
+        model = model or (allowed[0] if allowed else None)
+
     try:
         reply = await asyncio.wait_for(
-            run_traced_turn(request.message, request.conversation_id, provider=request.provider),
+            run_traced_turn(
+                request.message, request.conversation_id, provider=request.provider, model=model
+            ),
             timeout=CHAT_TIMEOUT_SECONDS,
         )
     except TimeoutError:

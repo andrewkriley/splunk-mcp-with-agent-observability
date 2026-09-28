@@ -39,22 +39,39 @@ def main():
 
     load_dotenv(env_path)
     all_ok = True
+    if str(REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT))
+    from app.observability import galileo_console_url, openai_spec_config
 
     print("LLM provider")
     provider = os.environ.get("LLM_PROVIDER", "").strip().lower()
-    provider_valid = provider in LLM_KEY_ENV_VARS
+    supported = set(LLM_KEY_ENV_VARS) | {"openai-spec"}
+    provider_valid = provider in supported
     all_ok &= check(
-        "LLM_PROVIDER is set to a supported value (anthropic | openai | gemini)",
+        "LLM_PROVIDER is set to a supported value (anthropic | openai | gemini | openai-spec)",
         provider_valid,
         f"got '{provider or '(empty)'}'",
     )
 
     key_present = {p: bool(os.environ.get(v, "").strip()) for p, v in LLM_KEY_ENV_VARS.items()}
+    try:
+        spec = openai_spec_config()
+    except ValueError as exc:
+        spec = None
+        all_ok &= check("OPENAI_SPEC_BASE_URL is a valid endpoint", False, str(exc))
+    if spec:
+        key_present["openai-spec"] = True
     any_key_present = any(key_present.values())
     filled_in = ", ".join(p for p, present in key_present.items() if present)
     all_ok &= check("At least one LLM API key is filled in", any_key_present, filled_in or "none set")
 
-    if provider_valid:
+    if provider_valid and provider == "openai-spec":
+        all_ok &= check(
+            "OPENAI_SPEC_API_KEY, OPENAI_SPEC_BASE_URL, and OPENAI_SPEC_MODELS are set",
+            spec is not None,
+            ", ".join(spec["models"]) if spec else "key, endpoint URL, and model list are all required",
+        )
+    elif provider_valid:
         all_ok &= check(
             f"{LLM_KEY_ENV_VARS[provider]} is filled in (matches LLM_PROVIDER={provider})",
             key_present[provider],
@@ -62,9 +79,6 @@ def main():
 
     print("\nSplunk Agent Observability (Galileo)")
     all_ok &= check("GALILEO_API_KEY is filled in", bool(os.environ.get("GALILEO_API_KEY", "").strip()))
-    if str(REPO_ROOT) not in sys.path:
-        sys.path.insert(0, str(REPO_ROOT))
-    from app.observability import galileo_console_url
 
     try:
         console_url = galileo_console_url()

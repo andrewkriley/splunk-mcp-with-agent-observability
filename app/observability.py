@@ -91,6 +91,38 @@ OPENAI_MODEL = "gpt-4o"
 ANTHROPIC_MODEL = "claude-sonnet-5"
 GEMINI_MODEL = "gemini-3.6-flash"
 
+
+def _http_base_url(value: str) -> str:
+    raw = value.strip()
+    if "://" not in raw:
+        raw = f"https://{raw}"
+    parsed = urlsplit(raw)
+    if parsed.scheme not in {"https", "http"} or not parsed.hostname:
+        raise ValueError("OPENAI_SPEC_BASE_URL must be an http(s) URL with a host")
+    if parsed.username or parsed.password:
+        raise ValueError("OPENAI_SPEC_BASE_URL must not include a username or password")
+    return raw.rstrip("/")
+
+
+def openai_spec_config() -> dict | None:
+    """OpenAI-compatible endpoint. None unless key, base URL, and models are all set."""
+    api_key = os.environ.get("OPENAI_SPEC_API_KEY", "").strip()
+    base_url = os.environ.get("OPENAI_SPEC_BASE_URL", "").strip()
+    models = [part.strip() for part in os.environ.get("OPENAI_SPEC_MODELS", "").split(",") if part.strip()]
+    if not api_key or not base_url or not models:
+        return None
+    return {"api_key": api_key, "base_url": _http_base_url(base_url), "models": models}
+
+
+def openai_client_settings(provider: str, model: str | None = None) -> dict:
+    if provider != "openai-spec":
+        return {}
+    spec = openai_spec_config()
+    if spec is None:
+        raise ValueError("OpenAI-spec provider needs OPENAI_SPEC_API_KEY, OPENAI_SPEC_BASE_URL, and OPENAI_SPEC_MODELS")
+    chosen = model if model in spec["models"] else spec["models"][0]
+    return {"model": chosen, "api_key": spec["api_key"], "base_url": spec["base_url"], "name": "openai-spec"}
+
 # KNOWN ISSUE (unresolved): in a real multi-round tool-calling conversation,
 # most (not all) `llm` spans for a worker silently never reach Splunk Agent Observability (Galileo) —
 # verified repeatedly against the real backend: a 4-6 round conversation
@@ -109,7 +141,16 @@ GEMINI_MODEL = "gemini-3.6-flash"
 _MAX_LOGGED_TURNS = 6
 
 
-def call_openai(messages: list[dict], tools: list[dict], system_prompt: str):
+def call_openai(
+    messages: list[dict],
+    tools: list[dict],
+    system_prompt: str,
+    *,
+    model: str | None = None,
+    api_key: str | None = None,
+    base_url: str | None = None,
+    name: str = "openai",
+):
     from galileo.openai import openai  # auto-logs every call, no decorator needed
 
     # Sync client on purpose: galileo.openai's wrapper only patches
@@ -120,13 +161,16 @@ def call_openai(messages: list[dict], tools: list[dict], system_prompt: str):
     # real regression: unpatched, it forwards `name=` straight to the real
     # API, which rejects it outright (`TypeError: unexpected keyword
     # argument 'name'`) — confirmed via a live 500 in the running app.
-    client = openai.OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    client_kwargs = {"api_key": api_key or os.environ["OPENAI_API_KEY"]}
+    if base_url:
+        client_kwargs["base_url"] = base_url
+    client = openai.OpenAI(**client_kwargs)
     full_messages = [{"role": "system", "content": system_prompt}, *messages]
     # `name` is captured by Splunk Agent Observability (Galileo)'s wrapper for the span label and stripped
     # before the real API call — it's not forwarded to OpenAI. The wrapper
     # already reads `model` from these same kwargs for the span's model field.
     return client.chat.completions.create(
-        model=OPENAI_MODEL, messages=full_messages, tools=tools or None, name="openai"
+        model=model or OPENAI_MODEL, messages=full_messages, tools=tools or None, name=name
     )
 
 
@@ -261,7 +305,9 @@ async def call_splunk_tool(tool_name: str, arguments: dict) -> str:
     return await mcp_client.call_tool(_mcp_session.get(), tool_name, arguments)
 
 
-async def run_traced_turn(user_message: str, conversation_id: str, provider: str | None = None) -> str:
+async def run_traced_turn(
+    user_message: str, conversation_id: str, provider: str | None = None, model: str | None = None
+) -> str:
     from app.agent import run_agent_turn
 
     apply_galileo_console_url()
@@ -281,7 +327,11 @@ async def run_traced_turn(user_message: str, conversation_id: str, provider: str
             set_mcp_session(session)
             tools = await mcp_client.list_splunk_tools(session)
             result = await run_agent_turn(
-                user_message, tools, provider=provider, history=prior_turns(conversation_id)
+                user_message,
+                tools,
+                provider=provider,
+                history=prior_turns(conversation_id),
+                model=model,
             )
 
         logger.conclude(output=result)
