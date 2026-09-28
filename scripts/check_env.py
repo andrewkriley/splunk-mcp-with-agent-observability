@@ -8,6 +8,7 @@ MCP token — instead of discovering a missing value later mid-session.
 import os
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 
@@ -61,6 +62,21 @@ def main():
 
     print("\nSplunk Agent Observability (Galileo)")
     all_ok &= check("GALILEO_API_KEY is filled in", bool(os.environ.get("GALILEO_API_KEY", "").strip()))
+    if str(REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT))
+    from app.observability import galileo_console_url
+
+    try:
+        console_url = galileo_console_url()
+        host = urlsplit(console_url).hostname or console_url
+        overridden = bool(os.environ.get("GALILEO_CONSOLE_URL", "").strip())
+        all_ok &= check(
+            "GALILEO_CONSOLE_URL override" if overridden else "Console URL",
+            True,
+            host if overridden else f"default {host}",
+        )
+    except ValueError as exc:
+        all_ok &= check("GALILEO_CONSOLE_URL is a valid console URL", False, str(exc))
 
     print("\nSplunk MCP")
     all_ok &= check("SPLUNK_INSTANCE_URL is filled in", bool(os.environ.get("SPLUNK_INSTANCE_URL", "").strip()))

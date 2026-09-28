@@ -106,7 +106,9 @@ it connects directly.
   identical code path never reproduced it at all. See the `KNOWN ISSUE`
   comment in `observability.py` for the full trail. If you see this during
   the workshop, it's not something wrong with your setup.
-- **`observability.py`** — OpenAI calls go through Splunk Agent Observability (Galileo)'s native
+- **`observability.py`** — Traces go to `https://app.galileo.ai` unless
+  `GALILEO_CONSOLE_URL` is set (for example
+  `https://console.multitenant.galileocloud.io`). OpenAI calls go through Splunk Agent Observability (Galileo)'s native
   `galileo.openai` wrapper (auto-logs, no decorator needed), passing
   `name="openai"` so its spans are labeled by provider instead of the
   wrapper's generic default (`"llm"`) — that kwarg is captured by Splunk Agent Observability (Galileo)
