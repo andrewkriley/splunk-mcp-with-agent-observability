@@ -7,7 +7,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from app.main import app
-from app.observability import openai_spec_config
+from app.observability import ANTHROPIC_MODEL, OPENAI_MODEL, call_openai, describe_llm, openai_spec_config
 
 SPEC_ENV = {
     "OPENAI_SPEC_API_KEY": "sk-spec-test",
@@ -109,3 +109,54 @@ class OpenAISpecApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(capture.seen["provider"], "openai-spec")
         self.assertEqual(capture.seen["model"], "mistral-small")
+
+
+class LlmLogTests(unittest.TestCase):
+    def setUp(self):
+        self.previous = {name: os.environ.get(name) for name in SPEC_ENV}
+
+    def tearDown(self):
+        for name, value in self.previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+    def test_selection_names_the_spec_model_and_host(self):
+        os.environ.update(SPEC_ENV)
+        provider, model, endpoint = describe_llm("openai-spec", "mistral-small")
+        self.assertEqual(provider, "openai-spec")
+        self.assertEqual(model, "mistral-small")
+        self.assertEqual(endpoint, "llm.example.com")
+
+    def test_builtin_providers_keep_their_hardcoded_models(self):
+        self.assertEqual(describe_llm("openai"), ("openai", OPENAI_MODEL, "api.openai.com"))
+        self.assertEqual(describe_llm("anthropic"), ("anthropic", ANTHROPIC_MODEL, "api.anthropic.com"))
+
+    def test_call_log_names_the_model_and_omits_the_key(self):
+        class FakeCompletions:
+            def create(self, **_kwargs):
+                return "response"
+
+        class FakeChat:
+            completions = FakeCompletions()
+
+        class FakeOpenAI:
+            def __init__(self, **_kwargs):
+                self.chat = FakeChat()
+
+        with patch("openai.OpenAI", FakeOpenAI), self.assertLogs("app.llm", level="INFO") as captured:
+            call_openai(
+                [],
+                [],
+                "system",
+                model="shared-gpt-oss-120b",
+                api_key="sk-spec-test",
+                base_url="https://inference.sharonai.cloud/api/v1",
+                name="openai-spec",
+            )
+        line = captured.output[0]
+        self.assertIn("LLM call provider=openai-spec", line)
+        self.assertIn("model=shared-gpt-oss-120b", line)
+        self.assertIn("endpoint=inference.sharonai.cloud", line)
+        self.assertNotIn("sk-spec-test", line)

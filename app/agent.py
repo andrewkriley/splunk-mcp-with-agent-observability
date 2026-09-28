@@ -181,6 +181,8 @@ async def run_agent_turn(
 ) -> str:
     provider = provider or os.environ.get("LLM_PROVIDER", "anthropic")
     history = list(history or [])
+    selected_provider, selected_model, endpoint = observability.describe_llm(provider, model)
+    observability.log_llm_use("selected", selected_provider, selected_model, endpoint)
     logger = galileo_context.get_logger_instance()
 
     logger.add_agent_span(input=user_message, name="supervisor", agent_type="supervisor")

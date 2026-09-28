@@ -28,8 +28,10 @@ A small web app with a chat interface, backed by an AI agent that:
 3. Each worker calls an LLM API (Anthropic, OpenAI, Gemini, or an OpenAI-spec
    endpoint — your own key) to reason about the question. A dropdown in the
    chat UI switches between whichever of those you have configured, per turn.
+   Anthropic, OpenAI, and Gemini each use one model hardcoded in
+   `app/observability.py`: `claude-sonnet-5`, `gpt-4o`, and `gemini-3.6-flash`.
    For an OpenAI-spec endpoint, a second dropdown lists the models from
-   `OPENAI_SPEC_MODELS`.
+   `OPENAI_SPEC_MODELS`, and the selected model is the one that is called.
 4. Lets the LLM call tools exposed by a **Splunk MCP server** to query your
    Splunk instance for the data it needs, with two safety nets against a
    stuck agent: a round cap, and a guard that stops if the model repeats an

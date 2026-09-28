@@ -15,6 +15,7 @@ single trace.
 
 import contextvars
 import json
+import logging
 import os
 import time
 from collections import OrderedDict
@@ -91,6 +92,32 @@ OPENAI_MODEL = "gpt-4o"
 ANTHROPIC_MODEL = "claude-sonnet-5"
 GEMINI_MODEL = "gemini-3.6-flash"
 
+# Own handler so this shows in the uvicorn process even when the root logger
+# is left at WARNING. The message is provider, model, and endpoint host only.
+_llm_log = logging.getLogger("app.llm")
+_llm_log.setLevel(logging.INFO)
+if not _llm_log.handlers:
+    _llm_handler = logging.StreamHandler()
+    _llm_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    _llm_log.addHandler(_llm_handler)
+_llm_log.propagate = False
+
+
+def describe_llm(provider: str, model: str | None = None) -> tuple[str, str, str]:
+    """Provider id, model name, and endpoint host that this turn will call."""
+    if provider == "openai-spec":
+        settings = openai_client_settings(provider, model)
+        return "openai-spec", settings["model"], urlsplit(settings["base_url"]).hostname or ""
+    if provider == "openai":
+        return "openai", model or OPENAI_MODEL, "api.openai.com"
+    if provider == "gemini":
+        return "gemini", GEMINI_MODEL, "generativelanguage.googleapis.com"
+    return "anthropic", ANTHROPIC_MODEL, "api.anthropic.com"
+
+
+def log_llm_use(kind: str, provider: str, model: str, endpoint: str) -> None:
+    _llm_log.info("LLM %s provider=%s model=%s endpoint=%s", kind, provider, model, endpoint)
+
 
 def _http_base_url(value: str) -> str:
     raw = value.strip()
@@ -164,13 +191,16 @@ def call_openai(
     client_kwargs = {"api_key": api_key or os.environ["OPENAI_API_KEY"]}
     if base_url:
         client_kwargs["base_url"] = base_url
+    resolved_model = model or OPENAI_MODEL
+    endpoint = urlsplit(base_url).hostname if base_url else ("api.openai.com" if name == "openai" else "")
+    log_llm_use("call", name, resolved_model, endpoint or "")
     client = openai.OpenAI(**client_kwargs)
     full_messages = [{"role": "system", "content": system_prompt}, *messages]
     # `name` is captured by Splunk Agent Observability (Galileo)'s wrapper for the span label and stripped
     # before the real API call — it's not forwarded to OpenAI. The wrapper
     # already reads `model` from these same kwargs for the span's model field.
     return client.chat.completions.create(
-        model=model or OPENAI_MODEL, messages=full_messages, tools=tools or None, name=name
+        model=resolved_model, messages=full_messages, tools=tools or None, name=name
     )
 
 
@@ -200,6 +230,7 @@ def call_anthropic(messages: list[dict], tools: list[dict], system_prompt: str):
     from anthropic import Anthropic
 
     client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    log_llm_use("call", "anthropic", ANTHROPIC_MODEL, "api.anthropic.com")
     start = time.time()
     response = client.messages.create(
         model=ANTHROPIC_MODEL,
@@ -262,6 +293,7 @@ def call_gemini(contents: list, tools: list[dict], system_prompt: str):
     from google.genai import types
 
     client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    log_llm_use("call", "gemini", GEMINI_MODEL, "generativelanguage.googleapis.com")
     config = types.GenerateContentConfig(
         system_instruction=system_prompt,
         tools=[types.Tool(function_declarations=tools)] if tools else None,
