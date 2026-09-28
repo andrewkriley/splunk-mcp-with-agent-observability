@@ -45,15 +45,16 @@
     margin-top: 0.15rem;
   }
   header .titles { flex: 1; }
-  #provider {
+  #provider, #model {
     background: var(--bg);
     color: var(--text);
     border: 1px solid var(--border);
     border-radius: 999px;
     padding: 0.35rem 0.75rem;
     font-size: 0.82rem;
+    max-width: 14rem;
   }
-  #provider:focus {
+  #provider:focus, #model:focus {
     outline: none;
     border-color: var(--green-bright);
   }
@@ -174,6 +175,7 @@
   <select id="provider" title="LLM provider" disabled>
     <option>Loading...</option>
   </select>
+  <select id="model" title="OpenAI-spec model" hidden disabled></select>
 </header>
 
 <div id="log"></div>
@@ -189,9 +191,21 @@ const form = document.getElementById("chat-form");
 const input = document.getElementById("message");
 const submitButton = document.getElementById("submit");
 const providerSelect = document.getElementById("provider");
+const modelSelect = document.getElementById("model");
 const conversationId = crypto.randomUUID(); // one Splunk Agent Observability (Galileo) session per page load
 
-const PROVIDER_LABELS = { anthropic: "Anthropic", openai: "OpenAI", gemini: "Gemini" };
+const PROVIDER_LABELS = {
+  anthropic: "Anthropic",
+  openai: "OpenAI",
+  gemini: "Gemini",
+  "openai-spec": "OpenAI spec",
+};
+
+function showModelList(provider) {
+  const show = provider === "openai-spec" && modelSelect.options.length > 0;
+  modelSelect.hidden = !show;
+  modelSelect.disabled = !show;
+}
 
 async function errorDetail(response) {
   let detail = `Server returned ${response.status}`;
@@ -213,7 +227,7 @@ async function loadProviders() {
   try {
     const response = await fetch("/config");
     if (!response.ok) throw new Error(await errorDetail(response));
-    const { providers, default_provider } = await response.json();
+    const { providers, default_provider, openai_spec_models } = await response.json();
     providerSelect.innerHTML = "";
     for (const provider of providers) {
       const option = document.createElement("option");
@@ -222,7 +236,16 @@ async function loadProviders() {
       if (provider === default_provider) option.selected = true;
       providerSelect.appendChild(option);
     }
+    modelSelect.innerHTML = "";
+    for (const model of openai_spec_models || []) {
+      const option = document.createElement("option");
+      option.value = model;
+      option.textContent = model;
+      modelSelect.appendChild(option);
+    }
     providerSelect.disabled = false;
+    providerSelect.addEventListener("change", () => showModelList(providerSelect.value));
+    showModelList(providerSelect.value);
     submitButton.disabled = false;
   } catch (err) {
     providerSelect.innerHTML = '<option value="">unavailable</option>';
@@ -261,7 +284,12 @@ form.addEventListener("submit", async (event) => {
     const response = await fetch("/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message, conversation_id: conversationId, provider: providerSelect.value || null }),
+      body: JSON.stringify({
+        message,
+        conversation_id: conversationId,
+        provider: providerSelect.value || null,
+        model: modelSelect.hidden ? null : modelSelect.value,
+      }),
     });
     if (!response.ok) throw new Error(await errorDetail(response));
     const data = await response.json();

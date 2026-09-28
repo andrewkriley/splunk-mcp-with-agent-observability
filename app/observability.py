@@ -15,6 +15,7 @@ single trace.
 
 import contextvars
 import json
+import logging
 import os
 import time
 from collections import OrderedDict
@@ -91,6 +92,64 @@ OPENAI_MODEL = "gpt-4o"
 ANTHROPIC_MODEL = "claude-sonnet-5"
 GEMINI_MODEL = "gemini-3.6-flash"
 
+# Own handler so this shows in the uvicorn process even when the root logger
+# is left at WARNING. The message is provider, model, and endpoint host only.
+_llm_log = logging.getLogger("app.llm")
+_llm_log.setLevel(logging.INFO)
+if not _llm_log.handlers:
+    _llm_handler = logging.StreamHandler()
+    _llm_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    _llm_log.addHandler(_llm_handler)
+_llm_log.propagate = False
+
+
+def describe_llm(provider: str, model: str | None = None) -> tuple[str, str, str]:
+    """Provider id, model name, and endpoint host that this turn will call."""
+    if provider == "openai-spec":
+        settings = openai_client_settings(provider, model)
+        return "openai-spec", settings["model"], urlsplit(settings["base_url"]).hostname or ""
+    if provider == "openai":
+        return "openai", model or OPENAI_MODEL, "api.openai.com"
+    if provider == "gemini":
+        return "gemini", GEMINI_MODEL, "generativelanguage.googleapis.com"
+    return "anthropic", ANTHROPIC_MODEL, "api.anthropic.com"
+
+
+def log_llm_use(kind: str, provider: str, model: str, endpoint: str) -> None:
+    _llm_log.info("LLM %s provider=%s model=%s endpoint=%s", kind, provider, model, endpoint)
+
+
+def _http_base_url(value: str) -> str:
+    raw = value.strip()
+    if "://" not in raw:
+        raw = f"https://{raw}"
+    parsed = urlsplit(raw)
+    if parsed.scheme not in {"https", "http"} or not parsed.hostname:
+        raise ValueError("OPENAI_SPEC_BASE_URL must be an http(s) URL with a host")
+    if parsed.username or parsed.password:
+        raise ValueError("OPENAI_SPEC_BASE_URL must not include a username or password")
+    return raw.rstrip("/")
+
+
+def openai_spec_config() -> dict | None:
+    """OpenAI-compatible endpoint. None unless key, base URL, and models are all set."""
+    api_key = os.environ.get("OPENAI_SPEC_API_KEY", "").strip()
+    base_url = os.environ.get("OPENAI_SPEC_BASE_URL", "").strip()
+    models = [part.strip() for part in os.environ.get("OPENAI_SPEC_MODELS", "").split(",") if part.strip()]
+    if not api_key or not base_url or not models:
+        return None
+    return {"api_key": api_key, "base_url": _http_base_url(base_url), "models": models}
+
+
+def openai_client_settings(provider: str, model: str | None = None) -> dict:
+    if provider != "openai-spec":
+        return {}
+    spec = openai_spec_config()
+    if spec is None:
+        raise ValueError("OpenAI-spec provider needs OPENAI_SPEC_API_KEY, OPENAI_SPEC_BASE_URL, and OPENAI_SPEC_MODELS")
+    chosen = model if model in spec["models"] else spec["models"][0]
+    return {"model": chosen, "api_key": spec["api_key"], "base_url": spec["base_url"], "name": "openai-spec"}
+
 # KNOWN ISSUE (unresolved): in a real multi-round tool-calling conversation,
 # most (not all) `llm` spans for a worker silently never reach Splunk Agent Observability (Galileo) —
 # verified repeatedly against the real backend: a 4-6 round conversation
@@ -109,7 +168,16 @@ GEMINI_MODEL = "gemini-3.6-flash"
 _MAX_LOGGED_TURNS = 6
 
 
-def call_openai(messages: list[dict], tools: list[dict], system_prompt: str):
+def call_openai(
+    messages: list[dict],
+    tools: list[dict],
+    system_prompt: str,
+    *,
+    model: str | None = None,
+    api_key: str | None = None,
+    base_url: str | None = None,
+    name: str = "openai",
+):
     from galileo.openai import openai  # auto-logs every call, no decorator needed
 
     # Sync client on purpose: galileo.openai's wrapper only patches
@@ -120,13 +188,19 @@ def call_openai(messages: list[dict], tools: list[dict], system_prompt: str):
     # real regression: unpatched, it forwards `name=` straight to the real
     # API, which rejects it outright (`TypeError: unexpected keyword
     # argument 'name'`) — confirmed via a live 500 in the running app.
-    client = openai.OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    client_kwargs = {"api_key": api_key or os.environ["OPENAI_API_KEY"]}
+    if base_url:
+        client_kwargs["base_url"] = base_url
+    resolved_model = model or OPENAI_MODEL
+    endpoint = urlsplit(base_url).hostname if base_url else ("api.openai.com" if name == "openai" else "")
+    log_llm_use("call", name, resolved_model, endpoint or "")
+    client = openai.OpenAI(**client_kwargs)
     full_messages = [{"role": "system", "content": system_prompt}, *messages]
     # `name` is captured by Splunk Agent Observability (Galileo)'s wrapper for the span label and stripped
     # before the real API call — it's not forwarded to OpenAI. The wrapper
     # already reads `model` from these same kwargs for the span's model field.
     return client.chat.completions.create(
-        model=OPENAI_MODEL, messages=full_messages, tools=tools or None, name="openai"
+        model=resolved_model, messages=full_messages, tools=tools or None, name=name
     )
 
 
@@ -156,6 +230,7 @@ def call_anthropic(messages: list[dict], tools: list[dict], system_prompt: str):
     from anthropic import Anthropic
 
     client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    log_llm_use("call", "anthropic", ANTHROPIC_MODEL, "api.anthropic.com")
     start = time.time()
     response = client.messages.create(
         model=ANTHROPIC_MODEL,
@@ -218,6 +293,7 @@ def call_gemini(contents: list, tools: list[dict], system_prompt: str):
     from google.genai import types
 
     client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    log_llm_use("call", "gemini", GEMINI_MODEL, "generativelanguage.googleapis.com")
     config = types.GenerateContentConfig(
         system_instruction=system_prompt,
         tools=[types.Tool(function_declarations=tools)] if tools else None,
@@ -261,7 +337,9 @@ async def call_splunk_tool(tool_name: str, arguments: dict) -> str:
     return await mcp_client.call_tool(_mcp_session.get(), tool_name, arguments)
 
 
-async def run_traced_turn(user_message: str, conversation_id: str, provider: str | None = None) -> str:
+async def run_traced_turn(
+    user_message: str, conversation_id: str, provider: str | None = None, model: str | None = None
+) -> str:
     from app.agent import run_agent_turn
 
     apply_galileo_console_url()
@@ -281,7 +359,11 @@ async def run_traced_turn(user_message: str, conversation_id: str, provider: str
             set_mcp_session(session)
             tools = await mcp_client.list_splunk_tools(session)
             result = await run_agent_turn(
-                user_message, tools, provider=provider, history=prior_turns(conversation_id)
+                user_message,
+                tools,
+                provider=provider,
+                history=prior_turns(conversation_id),
+                model=model,
             )
 
         logger.conclude(output=result)
