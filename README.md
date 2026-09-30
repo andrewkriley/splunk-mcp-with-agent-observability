@@ -20,11 +20,14 @@ A small web app with a chat interface, backed by an AI agent that:
    from the same page load are included with the new question, so a follow-up
    can refer to the previous answer. Reloading the page starts a fresh
    conversation.
-2. Classifies the question with a keyword heuristic (whole words, no extra
-   LLM call). A question can match security, infra, both, or neither
-   (general). Each match gets its own worker with a scoped system prompt and
-   tool subset. When more than one category matches, a synthesis call with
-   no tools combines their findings into one answer.
+2. Decides whether the question needs Splunk. A whole-word check looks at
+   this message and recent user turns for security, infra, or explicit Splunk
+   words (`splunk`, `index`, `search`, `oidemo`). A match opens Splunk MCP and
+   classifies the question as security, infra, both, or general. Each match
+   gets its own worker with a scoped system prompt and tool subset. When more
+   than one category matches, a synthesis call with no tools combines their
+   findings into one answer. A question with no Splunk intent skips MCP and
+   gets a direct answer from the model.
 3. Each worker calls an LLM API (Anthropic, OpenAI, Gemini, or an OpenAI-spec
    endpoint — your own key) to reason about the question. A dropdown in the
    chat UI switches between whichever of those you have configured, per turn.
@@ -32,9 +35,9 @@ A small web app with a chat interface, backed by an AI agent that:
    `app/observability.py`: `claude-sonnet-5`, `gpt-4o`, and `gemini-3.6-flash`.
    For an OpenAI-spec endpoint, a second dropdown lists the models from
    `OPENAI_SPEC_MODELS`, and the selected model is the one that is called.
-4. Lets the LLM call tools exposed by a **Splunk MCP server** to query your
-   Splunk instance for the data it needs, with two safety nets against a
-   stuck agent: a round cap, and a guard that stops if the model repeats an
+4. When the question has Splunk intent, lets the LLM call tools exposed by a
+   **Splunk MCP server** to query your Splunk instance, with two safety nets
+   against a stuck agent: a round cap, and a guard that stops if the model repeats an
    identical tool call (same tool, same arguments) at any point in that
    worker's turn.
 5. Traces each turn (prompts, tool calls, responses) to **Splunk Agent Observability (Galileo)** for

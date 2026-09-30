@@ -1,9 +1,12 @@
 """Supervisor -> classifier -> scoped worker(s): the agent structure for one chat turn.
 
-For each turn: a "supervisor" agent span wraps the whole thing. Inside it, a
-"classifier" agent span (a fast keyword heuristic, not an LLM call — keeps
-this deterministic and free of extra API cost/latency) picks one or more
-categories (security/infra/general) — a prompt can touch more than one, e.g.
+For each turn: a "supervisor" agent span wraps the whole thing. A whole-word
+keyword check decides whether this question, or an earlier user turn in the
+same conversation, is about Splunk. If it is not, the turn is one chat worker
+with no tools and Splunk MCP is not opened. If it is, a "classifier" agent
+span (the same keyword heuristic, not an LLM call — keeps this deterministic
+and free of extra API cost/latency) picks one or more categories
+(security/infra/general) — a prompt can touch more than one, e.g.
 "compare security notables with PDU power draw". Each matched category gets
 its own "react" worker agent span with a scoped system prompt and tool
 subset. If more than one category matched, a final synthesis LLM call (no
@@ -91,7 +94,17 @@ oidemo_notable (security notable events, sourcetype=stash — search
 sample data). Use whichever fits the question."""
 )
 
-CATEGORY_PROMPTS = {"security": SECURITY_SYSTEM_PROMPT, "infra": INFRA_SYSTEM_PROMPT, "general": GENERAL_SYSTEM_PROMPT}
+CHAT_SYSTEM_PROMPT = """\
+You are an AI assistant for a workshop participant. Answer from the \
+conversation. Splunk tools are not available for this question, so answer \
+directly and do not invent Splunk search results."""
+
+CATEGORY_PROMPTS = {
+    "security": SECURITY_SYSTEM_PROMPT,
+    "infra": INFRA_SYSTEM_PROMPT,
+    "general": GENERAL_SYSTEM_PROMPT,
+    "chat": CHAT_SYSTEM_PROMPT,
+}
 
 SYNTHESIS_SYSTEM_PROMPT = """\
 You are combining findings from multiple specialized Splunk sub-agents into \
@@ -121,10 +134,30 @@ INFRA_KEYWORDS = [
     "pdu", "power", "cooling", "crac", "temperature", "perfmon", "datacenter", "exchange",
     "infrastructure", "hardware", "amps", "volts",
 ]
+# Security and infra words, plus explicit Splunk words. A question that matches
+# none of these, and whose recent user turns also match none, does not open MCP.
+SPLUNK_INTENT_KEYWORDS = [
+    *SECURITY_KEYWORDS,
+    *INFRA_KEYWORDS,
+    "splunk",
+    "index",
+    "indexes",
+    "search",
+    "oidemo",
+]
 
 
 def _matches_any(text: str, keywords: list[str]) -> bool:
     return any(re.search(rf"\b{re.escape(keyword)}\b", text, flags=re.IGNORECASE) for keyword in keywords)
+
+
+def _needs_splunk(user_message: str, history: list[dict] | None = None) -> bool:
+    """True when this question or a recent user turn is a Splunk data question."""
+    texts = [user_message]
+    for message in history or []:
+        if message.get("role") == "user":
+            texts.append(message.get("content") or "")
+    return any(_matches_any(text, SPLUNK_INTENT_KEYWORDS) for text in texts)
 
 
 @log(span_type="agent", name="classifier", params={"agent_type": "classifier"})
@@ -138,6 +171,8 @@ def _classify(user_message: str) -> list[str]:
 
 
 def _scoped_tools(mcp_tools: list[dict], category: str) -> list[dict]:
+    if category == "chat":
+        return []
     allowed = CATEGORY_TOOL_NAMES.get(category)
     excluded = EXCLUDED_TOOLS if allowed is not None else GENERAL_EXCLUDED_TOOLS
     return [t for t in mcp_tools if t["name"] not in excluded and (allowed is None or t["name"] in allowed)]
@@ -178,6 +213,7 @@ async def run_agent_turn(
     provider: str | None = None,
     history: list[dict] | None = None,
     model: str | None = None,
+    use_splunk: bool = True,
 ) -> str:
     provider = provider or os.environ.get("LLM_PROVIDER", "anthropic")
     history = list(history or [])
@@ -186,6 +222,11 @@ async def run_agent_turn(
     logger = galileo_context.get_logger_instance()
 
     logger.add_agent_span(input=user_message, name="supervisor", agent_type="supervisor")
+
+    if not use_splunk:
+        result, status_code = await _run_worker(user_message, [], provider, "chat", history, model)
+        logger.conclude(output=result, status_code=status_code)
+        return result
 
     categories = _classify(user_message)
 

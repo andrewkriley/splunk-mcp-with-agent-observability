@@ -340,9 +340,11 @@ async def call_splunk_tool(tool_name: str, arguments: dict) -> str:
 async def run_traced_turn(
     user_message: str, conversation_id: str, provider: str | None = None, model: str | None = None
 ) -> str:
-    from app.agent import run_agent_turn
+    from app.agent import _needs_splunk, run_agent_turn
 
     apply_galileo_console_url()
+    history = prior_turns(conversation_id)
+    use_splunk = _needs_splunk(user_message, history)
     with galileo_context(
         project=os.environ.get("GALILEO_PROJECT", "splunk-mcp-with-agent-observability"),
         log_stream=os.environ.get("GALILEO_LOG_STREAM", "default"),
@@ -355,15 +357,26 @@ async def run_traced_turn(
         logger = galileo_context.get_logger_instance()
         logger.start_trace(input=user_message)
 
-        async with mcp_client.splunk_mcp_session() as session:
-            set_mcp_session(session)
-            tools = await mcp_client.list_splunk_tools(session)
+        if use_splunk:
+            async with mcp_client.splunk_mcp_session() as session:
+                set_mcp_session(session)
+                tools = await mcp_client.list_splunk_tools(session)
+                result = await run_agent_turn(
+                    user_message,
+                    tools,
+                    provider=provider,
+                    history=history,
+                    model=model,
+                )
+        else:
+            mcp_client.log_mcp_skipped()
             result = await run_agent_turn(
                 user_message,
-                tools,
+                [],
                 provider=provider,
-                history=prior_turns(conversation_id),
+                history=history,
                 model=model,
+                use_splunk=False,
             )
 
         logger.conclude(output=result)
