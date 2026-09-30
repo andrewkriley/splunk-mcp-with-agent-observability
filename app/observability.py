@@ -13,6 +13,7 @@ turn is wrapped in one `galileo_context` so every LLM/tool span lands in a
 single trace.
 """
 
+import asyncio
 import contextvars
 import json
 import logging
@@ -28,6 +29,8 @@ from app import mcp_client
 
 # Task-local so two overlapping /chat requests cannot share a Splunk session.
 _mcp_session: contextvars.ContextVar = contextvars.ContextVar("splunk_mcp_session")
+# Optional queue for the chat page: "model" while the LLM runs, "tool" on a Splunk call.
+_activity: contextvars.ContextVar[asyncio.Queue | None] = contextvars.ContextVar("chat_activity", default=None)
 _galileo_sessions: dict[str, str] = {}  # conversation_id -> Splunk Agent Observability (Galileo) session_id, so every
                                           # turn in one browser conversation lands in one session
 
@@ -35,6 +38,27 @@ _galileo_sessions: dict[str, str] = {}  # conversation_id -> Splunk Agent Observ
 MAX_HISTORY_TURNS = 8
 MAX_CONVERSATIONS = 100
 _history: OrderedDict[str, list[dict]] = OrderedDict()
+
+
+def bind_activity(queue: asyncio.Queue):
+    return _activity.set(queue)
+
+
+def reset_activity(token) -> None:
+    _activity.reset(token)
+
+
+async def announce(phase: str, detail: str = "") -> None:
+    """Tell the chat page whether this moment is a model call or a Splunk tool call.
+
+    Yields once so a streaming response can flush the status before a sync LLM
+    call blocks the event loop.
+    """
+    queue = _activity.get()
+    if queue is None:
+        return
+    await queue.put({"phase": phase, "detail": detail})
+    await asyncio.sleep(0)
 
 
 def set_mcp_session(session):

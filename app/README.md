@@ -6,9 +6,10 @@ A working reference chat app — run it with:
 uvicorn app.main:app --reload
 ```
 
-Then open http://127.0.0.1:8000 and ask it something about `oidemo` or
-`oidemo_notable` (see the [main README](../README.md#data-available-via-splunk-mcp)
-for what's in them). It needs everything from `.env` filled in (`python
+Then open http://127.0.0.1:8000. A short sequence of prompts is in the
+[main README](../README.md#prompt-ideas): check that the model answers, then
+ask which indexes exist, what is in them, and what to ask about the
+non-internal indexes (`oidemo` and `oidemo_notable`). It needs everything from `.env` filled in (`python
 scripts/check_env.py` first if unsure) — no separate MCP config file needed,
 it connects directly.
 
@@ -37,7 +38,9 @@ it connects directly.
   Generates a random `conversation_id` once per page load and sends it with
   every message. The server keeps the last 8 user/assistant turns for that
   id and sends them with the next question, so a follow-up can refer to the
-  previous answer. Search stays disabled until the provider list loads, and
+  previous answer. While a request runs, the pending line says "Noodling..."
+  during each model call and "Searching Splunk..." only while a Splunk tool
+  call is in flight. Search stays disabled until the provider list loads, and
   again while a request is in flight. A reload
   starts a fresh Splunk Agent Observability (Galileo) session and a fresh history.
 - **`mcp_client.py`** — connects to the Splunk MCP server at

@@ -4,18 +4,19 @@ Run from the repo root with: uvicorn app.main:app --reload
 """
 
 import asyncio
+import json
 import os
 from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
-from app.observability import openai_spec_config, run_traced_turn  # noqa: E402 — import after load_dotenv sets env vars
+from app.observability import bind_activity, openai_spec_config, reset_activity, run_traced_turn  # noqa: E402 — import after load_dotenv sets env vars
 
 app = FastAPI(title="splunk-mcp-with-agent-observability")
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
@@ -142,3 +143,56 @@ async def chat(request: ChatRequest):
     except Exception as exc:
         raise HTTPException(502, _public_error(exc)) from None
     return ChatResponse(reply=reply)
+
+
+@app.post("/chat/stream")
+async def chat_stream(request: ChatRequest):
+    """Stream status events, then the reply. The page shows noodling vs a Splunk tool call."""
+    if request.provider and request.provider not in _configured_providers():
+        raise HTTPException(400, f"'{request.provider}' has no API key configured in .env")
+
+    model = request.model
+    if request.provider == "openai-spec":
+        allowed = _openai_spec_models()
+        if model and model not in allowed:
+            raise HTTPException(400, f"'{model}' is not one of the configured OpenAI-spec models")
+        model = model or (allowed[0] if allowed else None)
+
+    queue: asyncio.Queue = asyncio.Queue()
+
+    async def run() -> None:
+        token = bind_activity(queue)
+        try:
+            reply = await asyncio.wait_for(
+                run_traced_turn(
+                    request.message, request.conversation_id, provider=request.provider, model=model
+                ),
+                timeout=CHAT_TIMEOUT_SECONDS,
+            )
+            await queue.put({"phase": "done", "reply": reply})
+        except TimeoutError:
+            await queue.put(
+                {
+                    "phase": "error",
+                    "detail": "The request timed out before the agent finished. Try a narrower question.",
+                }
+            )
+        except Exception as exc:
+            await queue.put({"phase": "error", "detail": _public_error(exc)})
+        finally:
+            reset_activity(token)
+
+    task = asyncio.create_task(run())
+
+    async def events():
+        try:
+            while True:
+                item = await queue.get()
+                yield f"data: {json.dumps(item)}\n\n"
+                if item["phase"] in {"done", "error"}:
+                    break
+        finally:
+            if not task.done():
+                task.cancel()
+
+    return StreamingResponse(events(), media_type="text/event-stream")

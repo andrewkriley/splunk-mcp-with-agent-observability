@@ -254,6 +254,31 @@ async function loadProviders() {
 }
 loadProviders();
 
+async function readChatStream(response, pending) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let reply = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+    const chunks = buffer.split("\n\n");
+    buffer = chunks.pop() || "";
+    for (const chunk of chunks) {
+      const line = chunk.split("\n").find((item) => item.startsWith("data: "));
+      if (!line) continue;
+      const event = JSON.parse(line.slice(6));
+      if (event.phase === "tool") pending.textContent = "Searching Splunk...";
+      else if (event.phase === "model") pending.textContent = "Noodling...";
+      else if (event.phase === "done") reply = event.reply || "";
+      else if (event.phase === "error") throw new Error(event.detail || "The request failed.");
+    }
+    if (done) break;
+  }
+  if (!reply) throw new Error("The response ended before an answer.");
+  return reply;
+}
+
 function addMessage(role, text) {
   const wrapper = document.createElement("div");
   wrapper.className = "msg " + role;
@@ -278,10 +303,10 @@ form.addEventListener("submit", async (event) => {
   input.value = "";
   input.disabled = true;
   submitButton.disabled = true;
-  const pending = addMessage("pending", "Searching Splunk...");
+  const pending = addMessage("pending", "Noodling...");
 
   try {
-    const response = await fetch("/chat", {
+    const response = await fetch("/chat/stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -292,9 +317,9 @@ form.addEventListener("submit", async (event) => {
       }),
     });
     if (!response.ok) throw new Error(await errorDetail(response));
-    const data = await response.json();
+    const reply = await readChatStream(response, pending);
     pending.remove();
-    addMessage("assistant", data.reply);
+    addMessage("assistant", reply);
   } catch (err) {
     pending.remove();
     addMessage("assistant", `Error: ${err.message}`);

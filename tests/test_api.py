@@ -41,6 +41,9 @@ class ChatApiTests(unittest.TestCase):
         self.assertIn("submitButton.disabled = true", html)
         self.assertIn("errorDetail", html)
         self.assertIn('maxlength="4000"', html)
+        self.assertIn("/chat/stream", html)
+        self.assertIn('addMessage("pending", "Noodling...")', html)
+        self.assertIn('pending.textContent = "Searching Splunk..."', html)
 
     def test_timeout_returns_a_readable_504(self):
         async def slow(*_args, **_kwargs):
@@ -74,3 +77,26 @@ class ChatApiTests(unittest.TestCase):
         self.assertIn("upstream failed", detail)
         self.assertNotIn("workshop-token-value", detail)
         self.assertIn("[redacted]", detail)
+
+    def test_stream_reports_a_tool_call_separately_from_the_model(self):
+        from app.observability import announce
+
+        async def scripted(*_args, **_kwargs):
+            await announce("model")
+            await announce("tool", "splunk_run_query")
+            await announce("model")
+            return "three notables"
+
+        with patch("app.main.run_traced_turn", scripted):
+            with self.client.stream(
+                "POST",
+                "/chat/stream",
+                json={"message": "show notables", "conversation_id": "c-stream"},
+            ) as response:
+                self.assertEqual(response.status_code, 200)
+                body = "".join(response.iter_text())
+
+        self.assertLess(body.index('"phase": "model"'), body.index('"phase": "tool"'))
+        self.assertIn("splunk_run_query", body)
+        self.assertIn("three notables", body)
+        self.assertLess(body.index('"phase": "tool"'), body.rindex('"phase": "model"'))

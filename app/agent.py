@@ -261,6 +261,7 @@ async def _synthesize(
     prompt = f"Original question: {user_message}\n\n{findings}"
     messages = [*history, {"role": "user", "content": prompt}]
 
+    await observability.announce("model")
     if provider in {"openai", "openai-spec"}:
         response = observability.call_openai(
             messages, [], SYNTHESIS_SYSTEM_PROMPT, **observability.openai_client_settings(provider, model)
@@ -300,6 +301,7 @@ async def _openai_loop(
     seen_calls: set[tuple[str, str]] = set()
 
     for _ in range(MAX_TURNS):
+        await observability.announce("model")
         response = observability.call_openai(messages, tools, system_prompt, **(client_settings or {}))
         message = response.choices[0].message
         if not message.tool_calls:
@@ -315,6 +317,7 @@ async def _openai_loop(
                 return _repeated_call_message(tool_call.function.name), 1
             seen_calls.add(call_key)
 
+            await observability.announce("tool", tool_call.function.name)
             result = await observability.call_splunk_tool(tool_call.function.name, arguments)
             messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": result})
 
@@ -329,6 +332,7 @@ async def _anthropic_loop(
     seen_calls: set[tuple[str, str]] = set()
 
     for _ in range(MAX_TURNS):
+        await observability.announce("model")
         response = observability.call_anthropic(messages, tools, system_prompt)
         tool_uses = [block for block in response.content if block.type == "tool_use"]
         if not tool_uses:
@@ -345,6 +349,7 @@ async def _anthropic_loop(
                 return _repeated_call_message(block.name), 1
             seen_calls.add(call_key)
 
+            await observability.announce("tool", block.name)
             result = await observability.call_splunk_tool(block.name, block.input)
             tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": result})
         messages.append({"role": "user", "content": tool_results})
@@ -364,6 +369,7 @@ async def _gemini_loop(
     seen_calls: set[tuple[str, str]] = set()
 
     for _ in range(MAX_TURNS):
+        await observability.announce("model")
         response = observability.call_gemini(contents, tools, system_prompt)
         calls = response.function_calls or []
         if not calls:
@@ -380,6 +386,7 @@ async def _gemini_loop(
                 return _repeated_call_message(call.name), 1
             seen_calls.add(call_key)
 
+            await observability.announce("tool", call.name)
             result = await observability.call_splunk_tool(call.name, args)
             result_parts.append(types.Part.from_function_response(name=call.name, response={"result": result}))
         contents.append(types.Content(role="user", parts=result_parts))
