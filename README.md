@@ -113,6 +113,36 @@ MCP is wired up in [step 9](./build.md)) something like:
 > then check oidemo for related PDU or cooling activity around the same
 > time."
 
+## Prompt ideas
+
+Ask these in order in the chat app (`http://127.0.0.1:8000`), on one page
+load, so each follow-up still has the earlier turn. The pending line says
+**Noodling...** while the model is answering and **Searching Splunk...** only
+while a Splunk tool call is running.
+
+1. **Is the model responding?**
+   No Splunk words, so this does not open MCP. You should see **Noodling...**
+   and a direct answer. That confirms the selected provider and model are
+   working before any search.
+
+2. **What indexes are available?**
+   `indexes` is a Splunk intent word, so this opens MCP and the line should
+   switch to **Searching Splunk...**. Expect the workshop indexes `oidemo`
+   and `oidemo_notable`, plus Splunk's own internal indexes such as
+   `_internal` and `_audit`.
+
+3. **What type of data is in these indexes?**
+   A follow-up on the same page. `oidemo` is datacenter telemetry (PDU power,
+   CRAC cooling, Windows/Exchange Perfmon). `oidemo_notable` is Enterprise
+   Security notable events tied to that telemetry. Internal indexes are
+   Splunk's own logs, not the workshop dataset.
+
+4. **What prompts should we ask about the non-internal indexes?**
+   Ask this after the index list, so "non-internal" means `oidemo` and
+   `oidemo_notable` rather than `_internal` or `_audit`. Then try one of the
+   questions it suggests, for example: "Any high severity notables in the
+   last 30 days?" or "What is the PDU power draw in oidemo?"
+
 ## Prerequisites
 
 ### On your workstation
