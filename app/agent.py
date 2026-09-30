@@ -144,6 +144,10 @@ SPLUNK_INTENT_KEYWORDS = [
     "indexes",
     "search",
     "oidemo",
+    "infra",
+    "security",
+    "threats",
+    "events",
 ]
 
 

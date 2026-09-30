@@ -82,6 +82,10 @@ class IntentGateTests(unittest.TestCase):
     def test_powershell_does_not_count_as_power(self):
         self.assertFalse(_needs_splunk("how do I use powershell"))
 
+    def test_added_trigger_words_open_splunk(self):
+        for question in ("check infra", "review security", "any threats", "show events"):
+            self.assertTrue(_needs_splunk(question), question)
+
     def test_chat_category_is_offered_no_tools(self):
         tools = [{"name": "splunk_run_query", "description": "", "input_schema": {}}]
         self.assertEqual(_scoped_tools(tools, "chat"), [])

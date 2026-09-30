@@ -22,7 +22,8 @@ A small web app with a chat interface, backed by an AI agent that:
    conversation.
 2. Decides whether the question needs Splunk. A whole-word check looks at
    this message and recent user turns for security, infra, or explicit Splunk
-   words (`splunk`, `index`, `search`, `oidemo`). A match opens Splunk MCP and
+   words (`splunk`, `index`, `search`, `oidemo`, `infra`, `security`, `threats`,
+   `events`). A match opens Splunk MCP and
    classifies the question as security, infra, both, or general. Each match
    gets its own worker with a scoped system prompt and tool subset. When more
    than one category matches, a synthesis call with no tools combines their

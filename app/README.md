@@ -50,7 +50,8 @@ it connects directly.
   - A **supervisor** agent span (`agent_type="supervisor"`) wraps the whole
     turn.
   - A whole-word keyword check decides whether to open Splunk MCP. Security
-    and infra words, plus `splunk`, `index`, `search`, and `oidemo`, count as
+    and infra words, plus `splunk`, `index`, `search`, `oidemo`, `infra`,
+    `security`, `threats`, and `events`, count as
     Splunk intent, including when they appear in a recent user turn so a
     follow-up still searches. Anything else is a direct chat reply with no
     tools and no MCP session.
