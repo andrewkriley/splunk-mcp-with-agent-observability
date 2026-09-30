@@ -20,11 +20,15 @@ A small web app with a chat interface, backed by an AI agent that:
    from the same page load are included with the new question, so a follow-up
    can refer to the previous answer. Reloading the page starts a fresh
    conversation.
-2. Classifies the question with a keyword heuristic (whole words, no extra
-   LLM call). A question can match security, infra, both, or neither
-   (general). Each match gets its own worker with a scoped system prompt and
-   tool subset. When more than one category matches, a synthesis call with
-   no tools combines their findings into one answer.
+2. Decides whether the question needs Splunk. A whole-word check looks at
+   this message and recent user turns for security, infra, or explicit Splunk
+   words (`splunk`, `index`, `search`, `oidemo`, `infra`, `security`, `threats`,
+   `events`). A match opens Splunk MCP and
+   classifies the question as security, infra, both, or general. Each match
+   gets its own worker with a scoped system prompt and tool subset. When more
+   than one category matches, a synthesis call with no tools combines their
+   findings into one answer. A question with no Splunk intent skips MCP and
+   gets a direct answer from the model.
 3. Each worker calls an LLM API (Anthropic, OpenAI, Gemini, or an OpenAI-spec
    endpoint — your own key) to reason about the question. A dropdown in the
    chat UI switches between whichever of those you have configured, per turn.
@@ -32,9 +36,9 @@ A small web app with a chat interface, backed by an AI agent that:
    `app/observability.py`: `claude-sonnet-5`, `gpt-4o`, and `gemini-3.6-flash`.
    For an OpenAI-spec endpoint, a second dropdown lists the models from
    `OPENAI_SPEC_MODELS`, and the selected model is the one that is called.
-4. Lets the LLM call tools exposed by a **Splunk MCP server** to query your
-   Splunk instance for the data it needs, with two safety nets against a
-   stuck agent: a round cap, and a guard that stops if the model repeats an
+4. When the question has Splunk intent, lets the LLM call tools exposed by a
+   **Splunk MCP server** to query your Splunk instance, with two safety nets
+   against a stuck agent: a round cap, and a guard that stops if the model repeats an
    identical tool call (same tool, same arguments) at any point in that
    worker's turn.
 5. Traces each turn (prompts, tool calls, responses) to **Splunk Agent Observability (Galileo)** for
@@ -108,6 +112,36 @@ MCP is wired up in [step 9](./build.md)) something like:
 > "Run an SPL search against index=oidemo_notable for high severity events,
 > then check oidemo for related PDU or cooling activity around the same
 > time."
+
+## Prompt ideas
+
+Ask these in order in the chat app (`http://127.0.0.1:8000`), on one page
+load, so each follow-up still has the earlier turn. The pending line says
+**Noodling...** while the model is answering and **Searching Splunk...** only
+while a Splunk tool call is running.
+
+1. **Is the model responding?**
+   No Splunk words, so this does not open MCP. You should see **Noodling...**
+   and a direct answer. That confirms the selected provider and model are
+   working before any search.
+
+2. **What indexes are available?**
+   `indexes` is a Splunk intent word, so this opens MCP and the line should
+   switch to **Searching Splunk...**. Expect the workshop indexes `oidemo`
+   and `oidemo_notable`, plus Splunk's own internal indexes such as
+   `_internal` and `_audit`.
+
+3. **What type of data is in these indexes?**
+   A follow-up on the same page. `oidemo` is datacenter telemetry (PDU power,
+   CRAC cooling, Windows/Exchange Perfmon). `oidemo_notable` is Enterprise
+   Security notable events tied to that telemetry. Internal indexes are
+   Splunk's own logs, not the workshop dataset.
+
+4. **What prompts should we ask about the non-internal indexes?**
+   Ask this after the index list, so "non-internal" means `oidemo` and
+   `oidemo_notable` rather than `_internal` or `_audit`. Then try one of the
+   questions it suggests, for example: "Any high severity notables in the
+   last 30 days?" or "What is the PDU power draw in oidemo?"
 
 ## Prerequisites
 

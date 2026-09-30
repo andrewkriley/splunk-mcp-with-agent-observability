@@ -6,9 +6,10 @@ A working reference chat app — run it with:
 uvicorn app.main:app --reload
 ```
 
-Then open http://127.0.0.1:8000 and ask it something about `oidemo` or
-`oidemo_notable` (see the [main README](../README.md#data-available-via-splunk-mcp)
-for what's in them). It needs everything from `.env` filled in (`python
+Then open http://127.0.0.1:8000. A short sequence of prompts is in the
+[main README](../README.md#prompt-ideas): check that the model answers, then
+ask which indexes exist, what is in them, and what to ask about the
+non-internal indexes (`oidemo` and `oidemo_notable`). It needs everything from `.env` filled in (`python
 scripts/check_env.py` first if unsure) — no separate MCP config file needed,
 it connects directly.
 
@@ -37,7 +38,9 @@ it connects directly.
   Generates a random `conversation_id` once per page load and sends it with
   every message. The server keeps the last 8 user/assistant turns for that
   id and sends them with the next question, so a follow-up can refer to the
-  previous answer. Search stays disabled until the provider list loads, and
+  previous answer. While a request runs, the pending line says "Noodling..."
+  during each model call and "Searching Splunk..." only while a Splunk tool
+  call is in flight. Search stays disabled until the provider list loads, and
   again while a request is in flight. A reload
   starts a fresh Splunk Agent Observability (Galileo) session and a fresh history.
 - **`mcp_client.py`** — connects to the Splunk MCP server at
@@ -49,10 +52,17 @@ it connects directly.
   loop:
   - A **supervisor** agent span (`agent_type="supervisor"`) wraps the whole
     turn.
-  - A **classifier** agent span (`agent_type="classifier"`) inside it picks
-    one or more categories — `security`, `infra`, or, when nothing matches,
-    `general` — via a fast whole-word keyword heuristic (not an LLM call, to
-    keep this deterministic and free of extra API cost/latency). `"power"`
+  - A whole-word keyword check decides whether to open Splunk MCP. Security
+    and infra words, plus `splunk`, `index`, `search`, `oidemo`, `infra`,
+    `security`, `threats`, and `events`, count as
+    Splunk intent, including when they appear in a recent user turn so a
+    follow-up still searches. Anything else is a direct chat reply with no
+    tools and no MCP session.
+  - A **classifier** agent span (`agent_type="classifier"`) runs only for a
+    Splunk question and picks one or more categories — `security`, `infra`,
+    or, when nothing matches, `general` — via that same keyword heuristic
+    (not an LLM call, to keep this deterministic and free of extra API
+    cost/latency). `"power"`
     matches a power question and does not match `"powershell"`. Each matched
     category selects a scoped system prompt (e.g. the security prompt knows
     `oidemo_notable` is `sourcetype=stash` with `severity` embedded as

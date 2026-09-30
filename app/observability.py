@@ -13,6 +13,7 @@ turn is wrapped in one `galileo_context` so every LLM/tool span lands in a
 single trace.
 """
 
+import asyncio
 import contextvars
 import json
 import logging
@@ -28,6 +29,8 @@ from app import mcp_client
 
 # Task-local so two overlapping /chat requests cannot share a Splunk session.
 _mcp_session: contextvars.ContextVar = contextvars.ContextVar("splunk_mcp_session")
+# Optional queue for the chat page: "model" while the LLM runs, "tool" on a Splunk call.
+_activity: contextvars.ContextVar[asyncio.Queue | None] = contextvars.ContextVar("chat_activity", default=None)
 _galileo_sessions: dict[str, str] = {}  # conversation_id -> Splunk Agent Observability (Galileo) session_id, so every
                                           # turn in one browser conversation lands in one session
 
@@ -35,6 +38,27 @@ _galileo_sessions: dict[str, str] = {}  # conversation_id -> Splunk Agent Observ
 MAX_HISTORY_TURNS = 8
 MAX_CONVERSATIONS = 100
 _history: OrderedDict[str, list[dict]] = OrderedDict()
+
+
+def bind_activity(queue: asyncio.Queue):
+    return _activity.set(queue)
+
+
+def reset_activity(token) -> None:
+    _activity.reset(token)
+
+
+async def announce(phase: str, detail: str = "") -> None:
+    """Tell the chat page whether this moment is a model call or a Splunk tool call.
+
+    Yields once so a streaming response can flush the status before a sync LLM
+    call blocks the event loop.
+    """
+    queue = _activity.get()
+    if queue is None:
+        return
+    await queue.put({"phase": phase, "detail": detail})
+    await asyncio.sleep(0)
 
 
 def set_mcp_session(session):
@@ -93,7 +117,7 @@ ANTHROPIC_MODEL = "claude-sonnet-5"
 GEMINI_MODEL = "gemini-3.6-flash"
 
 # Own handler so this shows in the uvicorn process even when the root logger
-# is left at WARNING. The message is provider, model, and endpoint host only.
+# is left at WARNING. Lines name the provider and the message text only.
 _llm_log = logging.getLogger("app.llm")
 _llm_log.setLevel(logging.INFO)
 if not _llm_log.handlers:
@@ -101,6 +125,16 @@ if not _llm_log.handlers:
     _llm_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
     _llm_log.addHandler(_llm_handler)
 _llm_log.propagate = False
+
+_SECRET_ENV_VARS = (
+    "SPLUNK_MCP_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "GEMINI_API_KEY",
+    "GALILEO_API_KEY",
+    "OPENAI_SPEC_API_KEY",
+)
+_MAX_LOGGED_MESSAGE_CHARS = 4000
 
 
 def describe_llm(provider: str, model: str | None = None) -> tuple[str, str, str]:
@@ -117,6 +151,86 @@ def describe_llm(provider: str, model: str | None = None) -> tuple[str, str, str
 
 def log_llm_use(kind: str, provider: str, model: str, endpoint: str) -> None:
     _llm_log.info("LLM %s provider=%s model=%s endpoint=%s", kind, provider, model, endpoint)
+
+
+def _redact_secrets(text: str, extra: tuple[str, ...] = ()) -> str:
+    for secret in [os.environ.get(name, "").strip() for name in _SECRET_ENV_VARS]:
+        if secret:
+            text = text.replace(secret, "[redacted]")
+    for secret in extra:
+        if secret:
+            text = text.replace(secret, "[redacted]")
+    return text
+
+
+def _clip(text: str, extra_secrets: tuple[str, ...] = ()) -> str:
+    text = _redact_secrets(text, extra_secrets)
+    if len(text) > _MAX_LOGGED_MESSAGE_CHARS:
+        return text[:_MAX_LOGGED_MESSAGE_CHARS] + "…"
+    return text
+
+
+def _message_text(content) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                if item.get("type") == "text":
+                    parts.append(str(item.get("text", "")))
+                elif item.get("type") == "tool_result":
+                    parts.append(f"[tool_result: {item.get('content', '')}]")
+                else:
+                    parts.append(json.dumps(item, default=str))
+            else:
+                text = getattr(item, "text", None)
+                parts.append(text if isinstance(text, str) else str(item))
+        return "\n".join(parts)
+    return str(content)
+
+
+def _render_message(message: dict, extra_secrets: tuple[str, ...] = ()) -> str:
+    role = message.get("role", "unknown")
+    pieces = [_message_text(message.get("content"))]
+    for call in message.get("tool_calls") or []:
+        function = call.get("function") or {}
+        pieces.append(f"[tool_call: {function.get('name')}({function.get('arguments')})]")
+    if message.get("reasoning"):
+        pieces.append(f"[reasoning: {message['reasoning']}]")
+    body = "\n".join(piece for piece in pieces if piece) or "(empty)"
+    return f"{role}: {_clip(body, extra_secrets)}"
+
+
+def log_llm_messages(
+    kind: str,
+    provider: str,
+    messages: list[dict],
+    *,
+    finish_reason: str | None = None,
+    extra_secrets: tuple[str, ...] = (),
+) -> None:
+    header = f"LLM {kind} provider={provider}"
+    if finish_reason:
+        header += f" finish_reason={finish_reason}"
+    body = "\n".join(_render_message(message, extra_secrets) for message in messages) or "(empty)"
+    _llm_log.info("%s\n%s", header, body)
+
+
+def _openai_output_message(choice) -> dict:
+    message = choice.message
+    extra = getattr(message, "model_extra", None) or {}
+    reasoning = getattr(message, "reasoning_content", None) or extra.get("reasoning_content") or extra.get("reasoning")
+    tool_calls = []
+    for call in message.tool_calls or []:
+        tool_calls.append(
+            {"function": {"name": call.function.name, "arguments": call.function.arguments}}
+        )
+    return {"role": "assistant", "content": message.content or "", "tool_calls": tool_calls, "reasoning": reasoning}
 
 
 def _http_base_url(value: str) -> str:
@@ -188,20 +302,31 @@ def call_openai(
     # real regression: unpatched, it forwards `name=` straight to the real
     # API, which rejects it outright (`TypeError: unexpected keyword
     # argument 'name'`) — confirmed via a live 500 in the running app.
-    client_kwargs = {"api_key": api_key or os.environ["OPENAI_API_KEY"]}
+    used_key = api_key or os.environ["OPENAI_API_KEY"]
+    client_kwargs = {"api_key": used_key}
     if base_url:
         client_kwargs["base_url"] = base_url
     resolved_model = model or OPENAI_MODEL
     endpoint = urlsplit(base_url).hostname if base_url else ("api.openai.com" if name == "openai" else "")
-    log_llm_use("call", name, resolved_model, endpoint or "")
-    client = openai.OpenAI(**client_kwargs)
     full_messages = [{"role": "system", "content": system_prompt}, *messages]
+    log_llm_use("call", name, resolved_model, endpoint or "")
+    log_llm_messages("input", name, full_messages, extra_secrets=(used_key,))
+    client = openai.OpenAI(**client_kwargs)
     # `name` is captured by Splunk Agent Observability (Galileo)'s wrapper for the span label and stripped
     # before the real API call — it's not forwarded to OpenAI. The wrapper
     # already reads `model` from these same kwargs for the span's model field.
-    return client.chat.completions.create(
+    response = client.chat.completions.create(
         model=resolved_model, messages=full_messages, tools=tools or None, name=name
     )
+    choice = response.choices[0]
+    log_llm_messages(
+        "output",
+        name,
+        [_openai_output_message(choice)],
+        finish_reason=choice.finish_reason,
+        extra_secrets=(used_key,),
+    )
+    return response
 
 
 def _anthropic_content_to_log(blocks) -> str:
@@ -231,6 +356,7 @@ def call_anthropic(messages: list[dict], tools: list[dict], system_prompt: str):
 
     client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     log_llm_use("call", "anthropic", ANTHROPIC_MODEL, "api.anthropic.com")
+    log_llm_messages("input", "anthropic", [{"role": "system", "content": system_prompt}, *messages])
     start = time.time()
     response = client.messages.create(
         model=ANTHROPIC_MODEL,
@@ -263,6 +389,11 @@ def call_anthropic(messages: list[dict], tools: list[dict], system_prompt: str):
         num_output_tokens=response.usage.output_tokens,
         duration_ns=int((time.time() - start) * 1e9),
     )
+    log_llm_messages(
+        "output",
+        "anthropic",
+        [{"role": "assistant", "content": _anthropic_content_to_log(response.content)}],
+    )
     return response
 
 
@@ -294,6 +425,17 @@ def call_gemini(contents: list, tools: list[dict], system_prompt: str):
 
     client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
     log_llm_use("call", "gemini", GEMINI_MODEL, "generativelanguage.googleapis.com")
+    log_llm_messages(
+        "input",
+        "gemini",
+        [
+            {"role": "system", "content": system_prompt},
+            *[
+                {"role": "assistant" if item.role == "model" else item.role, "content": _gemini_content_text(item)}
+                for item in contents
+            ],
+        ],
+    )
     config = types.GenerateContentConfig(
         system_instruction=system_prompt,
         tools=[types.Tool(function_declarations=tools)] if tools else None,
@@ -329,6 +471,7 @@ def call_gemini(contents: list, tools: list[dict], system_prompt: str):
         num_output_tokens=usage.candidates_token_count if usage else None,
         duration_ns=int((time.time() - start) * 1e9),
     )
+    log_llm_messages("output", "gemini", [{"role": "assistant", "content": logged_output}])
     return response
 
 
@@ -340,9 +483,11 @@ async def call_splunk_tool(tool_name: str, arguments: dict) -> str:
 async def run_traced_turn(
     user_message: str, conversation_id: str, provider: str | None = None, model: str | None = None
 ) -> str:
-    from app.agent import run_agent_turn
+    from app.agent import _needs_splunk, run_agent_turn
 
     apply_galileo_console_url()
+    history = prior_turns(conversation_id)
+    use_splunk = _needs_splunk(user_message, history)
     with galileo_context(
         project=os.environ.get("GALILEO_PROJECT", "splunk-mcp-with-agent-observability"),
         log_stream=os.environ.get("GALILEO_LOG_STREAM", "default"),
@@ -355,15 +500,26 @@ async def run_traced_turn(
         logger = galileo_context.get_logger_instance()
         logger.start_trace(input=user_message)
 
-        async with mcp_client.splunk_mcp_session() as session:
-            set_mcp_session(session)
-            tools = await mcp_client.list_splunk_tools(session)
+        if use_splunk:
+            async with mcp_client.splunk_mcp_session() as session:
+                set_mcp_session(session)
+                tools = await mcp_client.list_splunk_tools(session)
+                result = await run_agent_turn(
+                    user_message,
+                    tools,
+                    provider=provider,
+                    history=history,
+                    model=model,
+                )
+        else:
+            mcp_client.log_mcp_skipped()
             result = await run_agent_turn(
                 user_message,
-                tools,
+                [],
                 provider=provider,
-                history=prior_turns(conversation_id),
+                history=history,
                 model=model,
+                use_splunk=False,
             )
 
         logger.conclude(output=result)

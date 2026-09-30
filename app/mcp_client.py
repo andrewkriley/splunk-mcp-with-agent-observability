@@ -42,6 +42,10 @@ def _redact(text: str) -> str:
     return text
 
 
+def log_mcp_skipped() -> None:
+    _mcp_log.info("MCP skipped: no Splunk intent in this question or recent turns")
+
+
 def log_mcp_request(kind: str, detail: str = "") -> None:
     message = f"MCP {kind} endpoint={_endpoint()}"
     if detail:

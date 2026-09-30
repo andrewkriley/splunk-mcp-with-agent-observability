@@ -4,7 +4,7 @@ import asyncio
 import os
 import unittest
 
-from app.mcp_client import call_tool, list_splunk_tools, log_mcp_request
+from app.mcp_client import call_tool, list_splunk_tools, log_mcp_request, log_mcp_skipped
 
 
 class McpLogTests(unittest.TestCase):
@@ -22,6 +22,13 @@ class McpLogTests(unittest.TestCase):
                 os.environ.pop(name, None)
             else:
                 os.environ[name] = value
+
+    def test_skipped_intent_does_not_log_the_token(self):
+        with self.assertLogs("app.mcp", level="INFO") as captured:
+            log_mcp_skipped()
+        line = captured.output[0]
+        self.assertIn("MCP skipped", line)
+        self.assertNotIn("workshop-mcp-token", line)
 
     def test_session_log_names_the_endpoint_and_omits_the_token(self):
         with self.assertLogs("app.mcp", level="INFO") as captured:

@@ -134,9 +134,21 @@ class LlmLogTests(unittest.TestCase):
         self.assertEqual(describe_llm("anthropic"), ("anthropic", ANTHROPIC_MODEL, "api.anthropic.com"))
 
     def test_call_log_names_the_model_and_omits_the_key(self):
+        class FakeMessage:
+            content = "final answer"
+            tool_calls = None
+            model_extra = {"reasoning_content": "thought about sk-spec-test"}
+
+        class FakeChoice:
+            message = FakeMessage()
+            finish_reason = "stop"
+
+        class FakeResponse:
+            choices = [FakeChoice()]
+
         class FakeCompletions:
             def create(self, **_kwargs):
-                return "response"
+                return FakeResponse()
 
         class FakeChat:
             completions = FakeCompletions()
@@ -147,16 +159,22 @@ class LlmLogTests(unittest.TestCase):
 
         with patch("openai.OpenAI", FakeOpenAI), self.assertLogs("app.llm", level="INFO") as captured:
             call_openai(
+                [{"role": "user", "content": "use key sk-spec-test"}],
                 [],
-                [],
-                "system",
+                "system prompt",
                 model="shared-gpt-oss-120b",
                 api_key="sk-spec-test",
                 base_url="https://inference.sharonai.cloud/api/v1",
                 name="openai-spec",
             )
-        line = captured.output[0]
-        self.assertIn("LLM call provider=openai-spec", line)
-        self.assertIn("model=shared-gpt-oss-120b", line)
-        self.assertIn("endpoint=inference.sharonai.cloud", line)
-        self.assertNotIn("sk-spec-test", line)
+        logged = "\n".join(captured.output)
+        self.assertIn("LLM call provider=openai-spec", logged)
+        self.assertIn("model=shared-gpt-oss-120b", logged)
+        self.assertIn("endpoint=inference.sharonai.cloud", logged)
+        self.assertIn("LLM input provider=openai-spec", logged)
+        self.assertIn("system: system prompt", logged)
+        self.assertIn("user: use key [redacted]", logged)
+        self.assertIn("LLM output provider=openai-spec finish_reason=stop", logged)
+        self.assertIn("assistant: final answer", logged)
+        self.assertIn("[reasoning: thought about [redacted]]", logged)
+        self.assertNotIn("sk-spec-test", logged)
