@@ -1,4 +1,4 @@
-"""Galileo and Observability Cloud can both be configured, and a turn picks one."""
+"""Traces export to Observability Cloud, and Galileo settings stay hidden."""
 
 import os
 import unittest
@@ -7,13 +7,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from app.main import app
-from app.observability import (
-    activate_ao_destination,
-    ao_destination_target,
-    configured_ao_destinations,
-    default_ao_destination,
-    resolve_ao_destination,
-)
+from app.observability import _ao_session_id, _ao_sessions, activate_o11y, o11y_configured, o11y_errors, o11y_target
 
 AO_ENV = (
     "SPLUNK_AO_API_KEY",
@@ -32,7 +26,7 @@ AO_ENV = (
 )
 
 
-class AoDestinationTests(unittest.TestCase):
+class O11yDestinationTests(unittest.TestCase):
     def setUp(self):
         self.previous = {name: os.environ.get(name) for name in AO_ENV}
         for name in AO_ENV:
@@ -45,113 +39,76 @@ class AoDestinationTests(unittest.TestCase):
             else:
                 os.environ[name] = value
 
-    def test_galileo_key_alias_uses_the_default_console(self):
-        os.environ["GALILEO_API_KEY"] = "test-galileo-key"
-        self.assertEqual(configured_ao_destinations(), ["standalone"])
-        self.assertEqual(ao_destination_target("standalone"), "app.galileo.ai")
-        self.assertEqual(default_ao_destination(), "standalone")
+    def test_realm_and_token_are_required(self):
+        self.assertFalse(o11y_configured())
+        self.assertEqual(o11y_errors(), ["Observability Cloud needs SPLUNK_AO_REALM and SPLUNK_AO_O11Y_TOKEN"])
+        os.environ["SPLUNK_AO_REALM"] = "not a realm"
+        os.environ["SPLUNK_AO_O11Y_TOKEN"] = "test-o11y-token"
+        self.assertFalse(o11y_configured())
+        self.assertIn("SPLUNK_AO_REALM", o11y_errors()[0])
 
-    def test_console_override_rejects_userinfo(self):
-        os.environ["SPLUNK_AO_API_KEY"] = "test-galileo-key"
-        os.environ["SPLUNK_AO_CONSOLE_URL"] = "https://user:secret@console.example.com"
-        self.assertEqual(configured_ao_destinations(), [])
+    def test_target_uses_the_realm(self):
+        os.environ["SPLUNK_AO_REALM"] = "au0"
+        os.environ["SPLUNK_AO_O11Y_TOKEN"] = "test-o11y-token"
+        self.assertTrue(o11y_configured())
+        self.assertEqual(o11y_target(), "ingest.au0.observability.splunkcloud.com")
 
-    def test_both_destinations_keep_their_own_names(self):
+    def test_turn_hides_galileo_settings(self):
         os.environ["GALILEO_API_KEY"] = "test-galileo-key"
-        os.environ["GALILEO_CONSOLE_URL"] = "https://console.example.com"
+        os.environ["GALILEO_CONSOLE_URL"] = ""
         os.environ["GALILEO_PROJECT"] = "galileo-project"
-        os.environ["GALILEO_LOG_STREAM"] = "lab"
+        os.environ["SPLUNK_AO_API_KEY"] = "test-galileo-key"
         os.environ["SPLUNK_AO_REALM"] = "au0"
         os.environ["SPLUNK_AO_O11Y_TOKEN"] = "test-o11y-token"
         os.environ["SPLUNK_AO_O11Y_API_TOKEN"] = "test-o11y-token"
         os.environ["SPLUNK_AO_PROJECT"] = "o11y-project"
         os.environ["SPLUNK_AO_AGENT_STREAM"] = "traces"
-        self.assertEqual(configured_ao_destinations(), ["standalone", "o11y"])
-        self.assertEqual(ao_destination_target("o11y"), "ingest.au0.observability.splunkcloud.com")
 
-        with activate_ao_destination("o11y"):
+        with activate_o11y():
             self.assertEqual(os.environ["SPLUNK_AO_REALM"], "au0")
             self.assertEqual(os.environ["SPLUNK_AO_O11Y_TOKEN"], "test-o11y-token")
             self.assertNotIn("SPLUNK_AO_O11Y_API_TOKEN", os.environ)
             self.assertNotIn("SPLUNK_AO_API_KEY", os.environ)
+            self.assertNotIn("GALILEO_API_KEY", os.environ)
+            self.assertNotIn("GALILEO_CONSOLE_URL", os.environ)
+            self.assertNotIn("GALILEO_PROJECT", os.environ)
             self.assertEqual(os.environ["SPLUNK_AO_PROJECT"], "o11y-project")
             self.assertEqual(os.environ["SPLUNK_AO_AGENT_STREAM"], "traces")
 
-        with activate_ao_destination("standalone"):
-            self.assertEqual(os.environ["SPLUNK_AO_API_KEY"], "test-galileo-key")
-            self.assertEqual(os.environ["SPLUNK_AO_CONSOLE_URL"], "https://console.example.com")
-            self.assertNotIn("SPLUNK_AO_REALM", os.environ)
-            self.assertEqual(os.environ["SPLUNK_AO_PROJECT"], "galileo-project")
-            self.assertEqual(os.environ["SPLUNK_AO_AGENT_STREAM"], "lab")
-
         self.assertEqual(os.environ["GALILEO_API_KEY"], "test-galileo-key")
-        self.assertNotIn("SPLUNK_AO_API_KEY", os.environ)
-        self.assertEqual(os.environ["SPLUNK_AO_REALM"], "au0")
-        self.assertEqual(os.environ["SPLUNK_AO_PROJECT"], "o11y-project")
-
-    def test_blank_galileo_console_is_hidden_for_the_turn(self):
-        os.environ["GALILEO_API_KEY"] = "test-galileo-key"
-        os.environ["GALILEO_CONSOLE_URL"] = ""
-        os.environ["GALILEO_PROJECT"] = "galileo-project"
-        os.environ["GALILEO_LOG_STREAM"] = "lab"
-        os.environ["SPLUNK_AO_REALM"] = "au0"
-        os.environ["SPLUNK_AO_O11Y_TOKEN"] = "test-o11y-token"
-        os.environ["SPLUNK_AO_PROJECT"] = "o11y-project"
-        os.environ["SPLUNK_AO_AGENT_STREAM"] = "traces"
-
-        with activate_ao_destination("o11y"):
-            self.assertNotIn("GALILEO_CONSOLE_URL", os.environ)
-            self.assertNotIn("GALILEO_API_KEY", os.environ)
-            self.assertNotIn("GALILEO_PROJECT", os.environ)
-            self.assertEqual(os.environ["SPLUNK_AO_PROJECT"], "o11y-project")
-
-        with activate_ao_destination("standalone"):
-            self.assertNotIn("GALILEO_CONSOLE_URL", os.environ)
-            self.assertEqual(os.environ["SPLUNK_AO_CONSOLE_URL"], "https://app.galileo.ai")
-            self.assertEqual(os.environ["SPLUNK_AO_PROJECT"], "galileo-project")
-
-        self.assertEqual(os.environ["GALILEO_CONSOLE_URL"], "")
         self.assertEqual(os.environ["GALILEO_PROJECT"], "galileo-project")
+        self.assertEqual(os.environ["SPLUNK_AO_API_KEY"], "test-galileo-key")
 
-    def test_default_follows_splunk_ao_destination(self):
-        os.environ["GALILEO_API_KEY"] = "test-galileo-key"
-        os.environ["SPLUNK_AO_REALM"] = "us1"
-        os.environ["SPLUNK_AO_O11Y_TOKEN"] = "test-o11y-token"
-        os.environ["SPLUNK_AO_DESTINATION"] = "o11y"
-        self.assertEqual(resolve_ao_destination(None), "o11y")
-        self.assertEqual(resolve_ao_destination("standalone"), "standalone")
-        with self.assertRaises(ValueError):
-            resolve_ao_destination("elsewhere")
+    def test_session_external_id_is_the_conversation_id(self):
+        _ao_sessions.clear()
+        with patch("app.observability.start_session", return_value="api-session-id") as started:
+            first = _ao_session_id("conv-1")
+            second = _ao_session_id("conv-1")
+        self.assertEqual(first, "conv-1")
+        self.assertEqual(second, "conv-1")
+        started.assert_called_once_with(name="workshop-chat-conv-1", external_id="conv-1")
+        _ao_sessions.clear()
 
-    def test_config_lists_both_and_chat_sends_the_choice(self):
-        os.environ["SPLUNK_AO_API_KEY"] = "test-galileo-key"
+    def test_config_reports_observability_cloud_and_the_page_has_no_switch(self):
         os.environ["SPLUNK_AO_REALM"] = "au0"
         os.environ["SPLUNK_AO_O11Y_TOKEN"] = "test-o11y-token"
-        os.environ["SPLUNK_AO_DESTINATION"] = "standalone"
         client = TestClient(app)
         body = client.get("/config").json()
-        self.assertEqual(body["destinations"], ["standalone", "o11y"])
-        self.assertEqual(body["default_destination"], "standalone")
+        self.assertTrue(body["o11y_configured"])
+        self.assertEqual(body["o11y_target"], "ingest.au0.observability.splunkcloud.com")
+        self.assertNotIn("destinations", body)
         self.assertNotIn("test-o11y-token", client.get("/config").text)
+
+        html = client.get("/").text
+        self.assertNotIn('id="destination"', html)
+        self.assertNotIn("Galileo", html)
+        self.assertIn("Splunk Observability Cloud", html)
 
         async def capture(*_args, **kwargs):
             capture.seen = kwargs
             return "ok"
 
         with patch("app.main.run_traced_turn", capture):
-            response = client.post(
-                "/chat",
-                json={"message": "hi", "conversation_id": "c-ao", "destination": "o11y"},
-            )
+            response = client.post("/chat", json={"message": "hi", "conversation_id": "c-ao"})
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(capture.seen["destination"], "o11y")
-
-    def test_unconfigured_choice_is_rejected(self):
-        os.environ["SPLUNK_AO_API_KEY"] = "test-galileo-key"
-        client = TestClient(app)
-        response = client.post(
-            "/chat",
-            json={"message": "hi", "conversation_id": "c-ao", "destination": "o11y"},
-        )
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("not configured", response.json()["detail"])
+        self.assertNotIn("destination", capture.seen)

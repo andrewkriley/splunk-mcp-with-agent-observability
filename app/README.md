@@ -123,15 +123,12 @@ it connects directly.
   identical code path never reproduced it at all. See the `KNOWN ISSUE`
   comment in `observability.py` for the full trail. If you see this during
   the workshop, it's not something wrong with your setup.
-- **`observability.py`** — Each chat request names a destination. Galileo
-  settings stay in `GALILEO_API_KEY`, `GALILEO_CONSOLE_URL`, `GALILEO_PROJECT`,
-  and `GALILEO_LOG_STREAM` (`https://app.galileo.ai` when the console URL is
-  blank). Observability Cloud settings stay in `SPLUNK_AO_REALM`,
-  `SPLUNK_AO_O11Y_TOKEN`, `SPLUNK_AO_PROJECT`, and `SPLUNK_AO_AGENT_STREAM`.
-  Both can be filled in. The SDK rejects a process that has both variable sets
-  at once, so the app publishes only the selected set for that turn and then
-  restores the other. One turn runs at a time so two chats cannot retarget the
-  process mid-flight. OpenAI calls go through the native
+- **`observability.py`** — Traces go to Splunk Observability Cloud. Settings
+  are `SPLUNK_AO_REALM`, `SPLUNK_AO_O11Y_TOKEN`, `SPLUNK_AO_PROJECT`, and
+  `SPLUNK_AO_AGENT_STREAM`. The SDK treats leftover `GALILEO_*` names as a
+  second destination, so each turn hides those and publishes only the
+  Observability Cloud settings. One turn runs at a time so two chats cannot
+  rewrite that environment mid-flight. OpenAI calls go through the native
   `splunk_ao.openai` wrapper (auto-logs, no decorator needed), passing
   `name="openai"` (or `name="openai-spec"` for an OpenAI-compatible endpoint)
   so its spans are labeled by provider instead of the
@@ -152,8 +149,8 @@ it connects directly.
   and reports "not applicable"). Every Splunk MCP tool call still uses
   `@log(span_type="tool")`, which doesn't have this problem since its
   input/output are already simple strings. `run_traced_turn` maps each
-  `conversation_id` to a Splunk Agent Observability (Galileo) session (created once via `start_session`,
-  cached), explicitly calls `start_trace(input=user_message)` /
+  `conversation_id` to one Observability Cloud session (`start_session` stores that
+  id as the session external id; traces send the same id), explicitly calls `start_trace(input=user_message)` /
   `conclude(output=result)` so the trace shows the real question and answer
   rather than an arbitrary child span's input/output, and wraps it all in
   one `splunk_ao_context(session_id=...)` so every LLM/tool span from that

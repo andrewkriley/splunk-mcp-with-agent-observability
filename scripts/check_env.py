@@ -1,7 +1,7 @@
 """Check whether .env has everything needed to participate in the workshop.
 
 Run this after filling in .env to get a readiness report — at least one LLM
-key matching LLM_PROVIDER, a Galileo or Observability Cloud destination, and a Splunk instance URL +
+key matching LLM_PROVIDER, an Observability Cloud realm and token, and a Splunk instance URL +
 MCP token — instead of discovering a missing value later mid-session.
 """
 
@@ -40,7 +40,7 @@ def main():
     all_ok = True
     if str(REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(REPO_ROOT))
-    from app.observability import ao_destination_errors, ao_destination_target, configured_ao_destinations, openai_spec_config
+    from app.observability import o11y_configured, o11y_errors, o11y_target, openai_spec_config
 
     print("LLM provider")
     provider = os.environ.get("LLM_PROVIDER", "").strip().lower()
@@ -76,18 +76,10 @@ def main():
             key_present[provider],
         )
 
-    print("\nAgent Observability destination")
-    destinations = configured_ao_destinations()
-    labels = {"standalone": "Galileo", "o11y": "Observability Cloud"}
-    all_ok &= check(
-        "At least one destination is configured (Galileo and/or Observability Cloud)",
-        bool(destinations),
-        ", ".join(labels[name] for name in destinations) or "none set",
-    )
-    for name in destinations:
-        all_ok &= check(labels[name], True, ao_destination_target(name))
-    for error in ao_destination_errors():
-        all_ok &= check(error, False)
+    print("\nObservability Cloud")
+    configured = o11y_configured()
+    detail = o11y_target() if configured else (o11y_errors()[0] if o11y_errors() else "not configured")
+    all_ok &= check("SPLUNK_AO_REALM and SPLUNK_AO_O11Y_TOKEN are set", configured, detail)
 
     print("\nSplunk MCP")
     all_ok &= check("SPLUNK_INSTANCE_URL is filled in", bool(os.environ.get("SPLUNK_INSTANCE_URL", "").strip()))

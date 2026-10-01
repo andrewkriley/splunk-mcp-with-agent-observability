@@ -4,13 +4,12 @@
 
 A hands-on project for building an AI agent that queries live Splunk data
 through [MCP](https://modelcontextprotocol.io) and reports agent observability
-signals to Splunk Agent Observability. Traces can go to Galileo or to
-Agent Observability in Splunk Observability Cloud, switched per question.
+signals to Agent Observability in Splunk Observability Cloud.
 
 Dependencies:
 
 1. [Splunk Show workshop](https://show.splunk.com/template/946/)
-2. Splunk Agent Observability (Galileo, Observability Cloud, or both)
+2. Splunk Observability Cloud with Agent Observability
 3. An inference provider (Anthropic, OpenAI, OpenAI spec)
 
 ## What you'll build
@@ -46,11 +45,9 @@ A small web app with a chat interface, backed by an AI agent that:
    for agent observability, structured as `supervisor → [classifier, worker →
    [llm, tool, ...], …]` agent spans — every turn in one browser conversation
    is grouped under a single session, so a full back-and-forth shows up as one
-   session containing multiple traces. A second dropdown chooses the destination
-   for that turn when more than one is configured: **Galileo** (standalone Agent
-   Observability) or **Observability Cloud** (Agent Observability in Splunk
-   Observability Cloud). `SPLUNK_AO_DESTINATION` selects which one is active
-   when the page loads.
+   session containing multiple traces. Traces go to Agent Observability in
+   Splunk Observability Cloud. The realm and access token in `.env` tell the
+   SDK which ingest host to use.
 
 ```
  Browser (chat UI)
@@ -68,7 +65,7 @@ A small web app with a chat interface, backed by an AI agent that:
        │           synthesis LLM call (no tools)
        │
        ▼
-    selected destination (Galileo or Observability Cloud)
+    Splunk Observability Cloud (Agent Observability)
 ```
 
 The tracing SDK only ships a native wrapper for OpenAI (`splunk_ao.openai`, drop-in,
@@ -168,11 +165,10 @@ creating a Python virtual environment and installing the rest.
 
 ### Accounts & keys
 
-- A tracing destination. Either is enough, and both can be configured together:
-  - A [Galileo](https://app.galileo.ai/sign-up) account (standalone Splunk Agent Observability), or
-  - Splunk Observability Cloud with Agent Observability (realm + an ingest access token).
-    The SDK derives the console, API, and ingest hosts from the realm. See
-    [Find your organization keys](https://agent-observability-docs.splunk.com/references/faqs/find-keys#saas).
+- Splunk Observability Cloud with Agent Observability: the realm plus an
+  access token that can ingest traces and call the API. The SDK derives the
+  console, API, and ingest hosts from the realm. See
+  [Find your organization keys](https://agent-observability-docs.splunk.com/references/faqs/find-keys#saas).
 - Your own Anthropic, OpenAI, or Gemini API key (**not** a subscription tool
   like Claude Code/Claude.ai or Cursor/ChatGPT Plus — the app needs a key it
   can call directly). No key yet? [Google's Gemini API has a free tier](https://ai.google.dev/gemini-api/docs/pricing)
@@ -200,6 +196,6 @@ workshop, from cloning the repo through to a running app.
 | `app/main.py` | FastAPI app — `/chat`, `/config` (`uvicorn app.main:app --reload` to run it) |
 | `app/agent.py` | Per-provider LLM <-> Splunk MCP tool-calling loop |
 | `app/mcp_client.py` | Splunk MCP connection (self-signed cert handled) |
-| `app/observability.py` | Agent Observability tracing (Galileo or Observability Cloud, OpenAI wrapper / `@log`, sessions) |
-| `app/static/index.html` | The chat UI, with provider and destination switchers |
+| `app/observability.py` | Observability Cloud tracing (OpenAI wrapper / `@log`, sessions) |
+| `app/static/index.html` | The chat UI, with a provider switcher |
 | `.github/workflows/gitleaks.yml` | CI check that scans commits for leaked secrets |

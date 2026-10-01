@@ -51,9 +51,7 @@ class OpenAISpecConfigTests(unittest.TestCase):
 class OpenAISpecApiTests(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(app)
-        self.previous = {name: os.environ.get(name) for name in (*SPEC_ENV, "SPLUNK_AO_API_KEY", "SPLUNK_AO_CONSOLE_URL")}
-        os.environ["SPLUNK_AO_API_KEY"] = "test-galileo-key"
-        os.environ["SPLUNK_AO_CONSOLE_URL"] = "https://app.galileo.ai"
+        self.previous = {name: os.environ.get(name) for name in SPEC_ENV}
 
     def tearDown(self):
         for name, value in self.previous.items():

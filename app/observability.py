@@ -12,11 +12,10 @@ doesn't have this problem — its input/output are already simple. The whole
 turn is wrapped in one `splunk_ao_context` so every LLM/tool span lands in a
 single trace.
 
-Two destinations can be configured at once. `standalone` is legacy Galileo
-(API key + console URL). `o11y` is Splunk Observability Cloud Agent
-Observability (realm + ingest token). The SDK refuses to start when both
-sets of variables are present, so each turn publishes only the selected
-destination into the environment and restores the rest afterward.
+Traces go to Splunk Observability Cloud Agent Observability (realm + ingest
+token). The SDK still treats `GALILEO_*` and standalone `SPLUNK_AO_API_KEY`
+values as a second destination, including a blank console URL, so each turn
+hides those names and publishes only the Observability Cloud settings.
 """
 
 import asyncio
@@ -33,7 +32,6 @@ from urllib.parse import urlsplit
 
 from splunk_ao import log, splunk_ao_context, start_session
 from splunk_ao.config import SplunkAOConfig
-from splunk_ao.constants import DEFAULT_CONSOLE_URL
 
 from app import mcp_client
 
@@ -41,12 +39,11 @@ from app import mcp_client
 _mcp_session: contextvars.ContextVar = contextvars.ContextVar("splunk_mcp_session")
 # Optional queue for the chat page: "model" while the LLM runs, "tool" on a Splunk call.
 _activity: contextvars.ContextVar[asyncio.Queue | None] = contextvars.ContextVar("chat_activity", default=None)
-# (destination, conversation_id) -> session id, so every turn in one browser
-# conversation lands in one session on the destination selected for that turn.
-_ao_sessions: dict[tuple[str, str], str] = {}
-# Held for a whole turn. The SDK reads its destination from process environment,
-# so two overlapping chats cannot publish different destinations at once.
-_destination_lock = asyncio.Lock()
+# Conversations whose named Observability Cloud session was created in this process.
+_ao_sessions: set[str] = set()
+# Held for a whole turn. The SDK reads its destination from the process
+# environment, so two overlapping chats cannot rewrite it mid-flight.
+_o11y_lock = asyncio.Lock()
 _remembered_secrets: list[str] = []
 
 # Prior user/assistant text only. Tool transcripts stay inside the turn that made them.
@@ -98,14 +95,15 @@ def remember_turn(conversation_id: str, user_message: str, reply: str) -> None:
         _history.popitem(last=False)
 
 
-AO_DESTINATIONS = ("standalone", "o11y")
 _REALM_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,31}$")
-_STANDALONE_ENV = ("SPLUNK_AO_API_KEY", "SPLUNK_AO_CONSOLE_URL", "SPLUNK_AO_API_URL")
 _O11Y_ENV = ("SPLUNK_AO_REALM", "SPLUNK_AO_O11Y_TOKEN", "SPLUNK_AO_O11Y_API_TOKEN")
 _SHARED_ENV = ("SPLUNK_AO_PROJECT", "SPLUNK_AO_AGENT_STREAM")
-# The SDK keeps an existing GALILEO_* value even when it is blank, and that
-# value wins over the SPLUNK_AO_* names published for the selected turn.
-_GALILEO_HELD_ENV = (
+# Names the SDK would treat as a Galileo or standalone deployment.
+_HIDDEN_ENV = (
+    "SPLUNK_AO_API_KEY",
+    "SPLUNK_AO_CONSOLE_URL",
+    "SPLUNK_AO_API_URL",
+    "SPLUNK_AO_DESTINATION",
     "GALILEO_API_KEY",
     "GALILEO_API_URL",
     "GALILEO_CONSOLE_URL",
@@ -118,14 +116,6 @@ _GALILEO_HELD_ENV = (
 
 def _env(name: str) -> str:
     return os.environ.get(name, "").strip()
-
-
-def _first_env(*names: str) -> str:
-    for name in names:
-        value = _env(name)
-        if value:
-            return value
-    return ""
 
 
 def _remember_secret(value: str) -> None:
@@ -145,42 +135,14 @@ def _http_url(value: str, label: str) -> str:
     return raw.rstrip("/")
 
 
-def ao_project(destination: str) -> str:
-    """Project name for one destination. Each destination keeps its own env var."""
-    if destination == "standalone":
-        chosen = _first_env("GALILEO_PROJECT", "SPLUNK_AO_PROJECT")
-    else:
-        chosen = _first_env("SPLUNK_AO_PROJECT", "GALILEO_PROJECT")
-    return chosen or "splunk-mcp-with-agent-observability"
+def ao_project() -> str:
+    """Project name in Observability Cloud."""
+    return _env("SPLUNK_AO_PROJECT") or "splunk-mcp-with-agent-observability"
 
 
-def ao_agent_stream(destination: str) -> str:
-    """Agent Stream for one destination. Galileo calls this a log stream."""
-    if destination == "standalone":
-        chosen = _first_env("GALILEO_LOG_STREAM", "SPLUNK_AO_AGENT_STREAM")
-    else:
-        chosen = _first_env("SPLUNK_AO_AGENT_STREAM", "GALILEO_LOG_STREAM")
-    return chosen or "default"
-
-
-def _standalone_settings() -> tuple[dict[str, str] | None, str | None]:
-    """Env to publish for Galileo, or None when that destination is not configured."""
-    api_key = _first_env("SPLUNK_AO_API_KEY", "GALILEO_API_KEY")
-    console_raw = _first_env("SPLUNK_AO_CONSOLE_URL", "GALILEO_CONSOLE_URL")
-    api_url_raw = _env("SPLUNK_AO_API_URL")
-    if not api_key and not console_raw and not api_url_raw:
-        return None, None
-    if not api_key:
-        return None, "Standalone Agent Observability needs SPLUNK_AO_API_KEY or GALILEO_API_KEY"
-    try:
-        console_url = _http_url(console_raw, "Console URL") if console_raw else str(DEFAULT_CONSOLE_URL).rstrip("/")
-        published = {"SPLUNK_AO_API_KEY": api_key, "SPLUNK_AO_CONSOLE_URL": console_url}
-        if api_url_raw:
-            published["SPLUNK_AO_API_URL"] = _http_url(api_url_raw, "SPLUNK_AO_API_URL")
-    except ValueError as exc:
-        return None, str(exc)
-    _remember_secret(api_key)
-    return published, None
+def ao_agent_stream() -> str:
+    """Agent Stream name in Observability Cloud."""
+    return _env("SPLUNK_AO_AGENT_STREAM") or "default"
 
 
 def _o11y_settings() -> tuple[dict[str, str] | None, str | None]:
@@ -203,70 +165,37 @@ def _o11y_settings() -> tuple[dict[str, str] | None, str | None]:
     return published, None
 
 
-def ao_destination_errors() -> list[str]:
-    errors = [error for _settings, error in (_standalone_settings(), _o11y_settings()) if error]
-    requested = _env("SPLUNK_AO_DESTINATION").lower()
-    if requested and requested not in AO_DESTINATIONS:
-        errors.append("SPLUNK_AO_DESTINATION must be standalone or o11y")
-    elif requested and requested not in configured_ao_destinations():
-        errors.append(f"SPLUNK_AO_DESTINATION={requested} is not configured")
-    return errors
+def o11y_configured() -> bool:
+    settings, error = _o11y_settings()
+    return bool(settings) and not error
 
 
-def configured_ao_destinations() -> list[str]:
-    ready = []
-    standalone, standalone_error = _standalone_settings()
-    o11y, o11y_error = _o11y_settings()
-    if standalone and not standalone_error:
-        ready.append("standalone")
-    if o11y and not o11y_error:
-        ready.append("o11y")
-    return ready
+def o11y_errors() -> list[str]:
+    settings, error = _o11y_settings()
+    if error:
+        return [error]
+    if not settings:
+        return ["Observability Cloud needs SPLUNK_AO_REALM and SPLUNK_AO_O11Y_TOKEN"]
+    return []
 
 
-def default_ao_destination() -> str:
-    configured = configured_ao_destinations()
-    if not configured:
-        raise ValueError("No Agent Observability destination is configured in .env")
-    requested = _env("SPLUNK_AO_DESTINATION").lower()
-    if requested in configured:
-        return requested
-    return configured[0]
-
-
-def resolve_ao_destination(requested: str | None) -> str:
-    choice = (requested or "").strip().lower()
-    if not choice:
-        return default_ao_destination()
-    if choice not in AO_DESTINATIONS:
-        raise ValueError(f"Unknown Agent Observability destination '{choice}'.")
-    if choice not in configured_ao_destinations():
-        raise ValueError(f"'{choice}' is not configured in .env")
-    return choice
-
-
-def ao_destination_target(destination: str) -> str:
-    """Host or realm the selected destination exports to. No secrets."""
-    if destination == "o11y":
-        settings, _error = _o11y_settings()
-        realm = (settings or {}).get("SPLUNK_AO_REALM", "")
-        return f"ingest.{realm}.observability.splunkcloud.com" if realm else ""
-    settings, _error = _standalone_settings()
-    console = (settings or {}).get("SPLUNK_AO_CONSOLE_URL", "")
-    return urlsplit(console).hostname or console
+def o11y_target() -> str:
+    """Ingest host for the configured realm. No secrets."""
+    settings, _error = _o11y_settings()
+    realm = (settings or {}).get("SPLUNK_AO_REALM", "")
+    return f"ingest.{realm}.observability.splunkcloud.com" if realm else ""
 
 
 @contextmanager
-def activate_ao_destination(destination: str) -> Iterator[None]:
-    """Publish one destination's SDK variables and hide the other set."""
-    choice = resolve_ao_destination(destination)
-    settings = _standalone_settings()[0] if choice == "standalone" else _o11y_settings()[0]
+def activate_o11y() -> Iterator[None]:
+    """Publish Observability Cloud settings and hide Galileo names for this turn."""
+    settings, error = _o11y_settings()
     if not settings:
-        raise ValueError(f"'{choice}' is not configured in .env")
-    project = ao_project(choice)
-    agent_stream = ao_agent_stream(choice)
-    target = ao_destination_target(choice)
-    managed = (*_STANDALONE_ENV, *_O11Y_ENV, *_SHARED_ENV, *_GALILEO_HELD_ENV)
+        raise ValueError(error or "Observability Cloud is not configured in .env")
+    project = ao_project()
+    agent_stream = ao_agent_stream()
+    target = o11y_target()
+    managed = (*_O11Y_ENV, *_SHARED_ENV, *_HIDDEN_ENV)
     previous = {name: os.environ.get(name) for name in managed}
     try:
         for name in managed:
@@ -274,9 +203,8 @@ def activate_ao_destination(destination: str) -> Iterator[None]:
         os.environ.update(settings)
         os.environ["SPLUNK_AO_PROJECT"] = project
         os.environ["SPLUNK_AO_AGENT_STREAM"] = agent_stream
-        # A previous turn may have cached the other destination's client.
         SplunkAOConfig._instance = None
-        _llm_log.info("AO selected destination=%s target=%s", choice, target)
+        _llm_log.info("AO target=%s", target)
         yield
     finally:
         for name, value in previous.items():
@@ -286,11 +214,17 @@ def activate_ao_destination(destination: str) -> Iterator[None]:
                 os.environ[name] = value
 
 
-def _ao_session_id(conversation_id: str, destination: str) -> str:
-    key = (destination, conversation_id)
-    if key not in _ao_sessions:
-        _ao_sessions[key] = start_session(name=f"workshop-chat-{conversation_id}")
-    return _ao_sessions[key]
+def _ao_session_id(conversation_id: str) -> str:
+    """Conversation id used as the session external id, so traces join that session.
+
+    Observability Cloud matches gen_ai.conversation.id to a session external id.
+    The id returned by start_session is a different value, and exporting it
+    creates a second session named "session".
+    """
+    if conversation_id not in _ao_sessions:
+        start_session(name=f"workshop-chat-{conversation_id}", external_id=conversation_id)
+        _ao_sessions.add(conversation_id)
+    return conversation_id
 
 
 OPENAI_MODEL = "gpt-4o"
@@ -669,19 +603,17 @@ async def run_traced_turn(
     conversation_id: str,
     provider: str | None = None,
     model: str | None = None,
-    destination: str | None = None,
 ) -> str:
     from app.agent import _needs_splunk, run_agent_turn
 
-    destination = resolve_ao_destination(destination)
     history = prior_turns(conversation_id)
     use_splunk = _needs_splunk(user_message, history)
-    async with _destination_lock:
-        with activate_ao_destination(destination):
+    async with _o11y_lock:
+        with activate_o11y():
             with splunk_ao_context(
-                project=ao_project(destination),
-                agent_stream=ao_agent_stream(destination),
-                session_id=_ao_session_id(conversation_id, destination),
+                project=ao_project(),
+                agent_stream=ao_agent_stream(),
+                session_id=_ao_session_id(conversation_id),
             ):
                 # Without an explicit start_trace/conclude, the SDK lazily creates the
                 # trace from whichever child span happens to log first — so the trace's

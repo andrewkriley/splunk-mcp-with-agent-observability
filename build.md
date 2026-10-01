@@ -11,18 +11,23 @@ git clone https://github.com/andrewkriley/splunk-mcp-with-agent-observability.gi
 cd splunk-mcp-with-agent-observability
 ```
 
-## 2. Sign up for Splunk Agent Observability (Galileo)
+## 2. Note your Observability Cloud realm
 
-1. Go to https://app.galileo.ai/sign-up and create an account.
-2. Verify your email address (check your inbox for a verification link).
-3. Log in at https://app.galileo.ai and confirm you can reach your dashboard.
+Traces go to Agent Observability in Splunk Observability Cloud. The realm is
+the label in `https://app.<realm>.observability.splunkcloud.com`, for example
+`au0`. The SDK builds the console, API, and ingest hosts from that realm.
 
-## 3. Create a Splunk Agent Observability (Galileo) API key
+## 3. Create an Observability Cloud access token
 
-1. In the Splunk Agent Observability (Galileo) console, go to your account/API key settings.
-2. Create a new API key and copy it somewhere safe — it's only shown once.
-3. Note (or create) a project name you'll use for this workshop, e.g.
+1. In Observability Cloud, open Settings → Access tokens.
+2. Create a token with ingest permission and API access. One token is enough
+   when it has both scopes. The `agent_observability_admin` role lets the SDK
+   create the project and Agent Stream.
+3. Copy the token somewhere safe — it is only shown once.
+4. Note (or create) a project name you'll use for this workshop, e.g.
    `splunk-mcp-with-agent-observability`.
+
+Details: https://agent-observability-docs.splunk.com/references/faqs/find-keys#saas
 
 ## 4. Set up your `.env` file
 
@@ -30,31 +35,7 @@ cd splunk-mcp-with-agent-observability
 cp .env.example .env
 ```
 
-Open `.env` and fill in the Galileo destination:
-
-```
-GALILEO_API_KEY=<the key you just created>
-GALILEO_PROJECT=splunk-mcp-with-agent-observability
-GALILEO_LOG_STREAM=default
-GALILEO_CONSOLE_URL=
-SPLUNK_AO_DESTINATION=standalone
-```
-
-Galileo uses the `GALILEO_*` names. Observability Cloud uses `SPLUNK_AO_REALM`,
-`SPLUNK_AO_O11Y_TOKEN`, `SPLUNK_AO_PROJECT`, and `SPLUNK_AO_AGENT_STREAM`.
-
-Leave the console URL blank to use the default console, `https://app.galileo.ai`.
-To send traces to another standalone instance, set the full console URL, for
-example `https://console.multitenant.galileocloud.io`. The SDK then calls the
-matching API host (`console` or `app` in the hostname becomes `api`).
-
-### Observability Cloud as well
-
-If you also have Agent Observability inside Splunk Observability Cloud, fill in
-the second block. Both can be set at once. The chat page lists each complete
-destination and you pick one per question, the same way you pick an LLM provider.
-`SPLUNK_AO_DESTINATION` (`standalone` or `o11y`) is the one selected when the
-page loads.
+Open `.env` and fill in Observability Cloud:
 
 ```
 SPLUNK_AO_REALM=<realm from app.<realm>.observability.splunkcloud.com>
@@ -63,16 +44,10 @@ SPLUNK_AO_PROJECT=splunk-mcp-with-agent-observability
 SPLUNK_AO_AGENT_STREAM=default
 ```
 
-One token is enough when it has both ingest and API scopes. Add
-`SPLUNK_AO_O11Y_API_TOKEN` only when project calls need a different token.
-
-The SDK builds the console, API, and OTLP ingest hosts from the realm. For
-`au0`, traces go to `https://ingest.au0.observability.splunkcloud.com/v2/trace/otlp`.
-Put the realm in `SPLUNK_AO_REALM`. The ingest host is not a console URL.
-Create the token in Observability Cloud under Settings → Access tokens, with
-ingest permission and the `agent_observability_admin` role if the SDK should
-also create the project and Agent Stream. Details:
-https://agent-observability-docs.splunk.com/references/faqs/find-keys#saas
+Add `SPLUNK_AO_O11Y_API_TOKEN` only when project calls need a different token.
+For realm `au0`, traces go to
+`https://ingest.au0.observability.splunkcloud.com/v2/trace/otlp`. Put the
+realm in `SPLUNK_AO_REALM`. The ingest host is not a separate setting.
 
 ## 5. Get your Splunk details from the facilitator
 
@@ -178,7 +153,7 @@ python scripts/check_env.py
 ```
 
 This confirms you have at least one LLM key set and matching `LLM_PROVIDER`,
-a Splunk Agent Observability (Galileo) API key, and a Splunk instance URL + MCP token — before you go any
+an Observability Cloud realm and token, and a Splunk instance URL + MCP token — before you go any
 further.
 
 ## 9. Wire up your Splunk MCP connection
@@ -231,7 +206,7 @@ client, Splunk Agent Observability (Galileo) tracing, chat UI).
   then delete and recreate `.venv` using a 3.11+ interpreter as shown in
   [step 7](#7-create-a-virtual-environment-and-install-dependencies).
 - **Not sure what's missing from `.env`** — run `python scripts/check_env.py`
-  for a full readiness report (LLM key/provider match, Splunk Agent Observability (Galileo), Splunk MCP).
+  for a full readiness report (LLM key/provider match, Observability Cloud, Splunk MCP).
 - **`scripts/setup_mcp.py` reports missing env vars** — double check `.env`
   has `SPLUNK_INSTANCE_URL` and `SPLUNK_MCP_TOKEN` filled in (not left blank
   from `.env.example`), and that `SPLUNK_INSTANCE_URL` is just the base URL
@@ -261,13 +236,10 @@ client, Splunk Agent Observability (Galileo) tracing, chat UI).
   a Cloud project access issue, not a bad key. Create a new key at
   https://aistudio.google.com/apikey while signed in with a plain gmail.com
   account instead of a legacy/grandfathered Google Workspace account.
-- **No traces show up** — confirm the destination you selected in the chat UI
-  is the one you are looking at. Galileo needs `GALILEO_API_KEY` and
-  `GALILEO_PROJECT`. Observability Cloud needs
-  `SPLUNK_AO_REALM` and `SPLUNK_AO_O11Y_TOKEN`, and the traces are under
-  Agent Observability in that realm, not on the ingest host. Traces appear
-  after a completed request. The server log line `AO selected destination=`
-  names which one that turn used.
+- **No traces show up** — confirm `SPLUNK_AO_REALM` and `SPLUNK_AO_O11Y_TOKEN`
+  are set, and look under Agent Observability in that realm, not on the
+  ingest host. Traces appear after a completed request. The server log line
+  `AO target=` names the ingest host for that turn.
 - **Metrics (e.g. `groundedness`, `tool_selection_quality`) stay stuck on
   "queued"/"pending" on every trace, even old ones** — this isn't caused by
   the app or `.env`. Confirmed via the Splunk Agent Observability (Galileo) API: the account's scoring

@@ -103,8 +103,7 @@ class IntentGateTests(unittest.TestCase):
             return "direct answer"
 
         with (
-            patch("app.observability.resolve_ao_destination", return_value="standalone"),
-            patch("app.observability.activate_ao_destination"),
+            patch("app.observability.activate_o11y"),
             patch("app.observability._ao_session_id", return_value="sess"),
             patch("app.observability.splunk_ao_context", galileo),
             patch("app.observability.mcp_client.splunk_mcp_session") as session,
@@ -134,8 +133,7 @@ class IntentGateTests(unittest.TestCase):
             return "3 notables"
 
         with (
-            patch("app.observability.resolve_ao_destination", return_value="standalone"),
-            patch("app.observability.activate_ao_destination"),
+            patch("app.observability.activate_o11y"),
             patch("app.observability._ao_session_id", return_value="sess"),
             patch("app.observability.splunk_ao_context", galileo),
             patch("app.observability.mcp_client.splunk_mcp_session", return_value=session),

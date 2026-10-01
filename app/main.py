@@ -1,4 +1,4 @@
-"""Minimal FastAPI chat app: browser <-> LLM agent <-> Splunk MCP, traced to Splunk Agent Observability (Galileo).
+"""Minimal FastAPI chat app: browser <-> LLM agent <-> Splunk MCP, traced to Observability Cloud.
 
 Run from the repo root with: uvicorn app.main:app --reload
 """
@@ -18,11 +18,10 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 from app.observability import (  # noqa: E402 — import after load_dotenv sets env vars
     bind_activity,
-    configured_ao_destinations,
-    default_ao_destination,
+    o11y_configured,
+    o11y_target,
     openai_spec_config,
     reset_activity,
-    resolve_ao_destination,
     run_traced_turn,
 )
 
@@ -54,7 +53,6 @@ class ChatRequest(BaseModel):
     conversation_id: str = Field(min_length=1, max_length=128)
     provider: str | None = None
     model: str | None = Field(default=None, max_length=128)
-    destination: str | None = Field(default=None, max_length=32)
 
     @field_validator("message")
     @classmethod
@@ -86,8 +84,8 @@ class ConfigResponse(BaseModel):
     providers: list[str]
     default_provider: str
     openai_spec_models: list[str] = []
-    destinations: list[str] = []
-    default_destination: str = ""
+    o11y_configured: bool = False
+    o11y_target: str = ""
 
 
 def _configured_providers() -> list[str]:
@@ -121,21 +119,16 @@ async def config():
 
     env_default = os.environ.get("LLM_PROVIDER", "").strip()
     default_provider = env_default if env_default in providers else providers[0]
-    destinations = configured_ao_destinations()
-    try:
-        default_destination = default_ao_destination() if destinations else ""
-    except ValueError:
-        default_destination = ""
     return ConfigResponse(
         providers=providers,
         default_provider=default_provider,
         openai_spec_models=_openai_spec_models(),
-        destinations=destinations,
-        default_destination=default_destination,
+        o11y_configured=o11y_configured(),
+        o11y_target=o11y_target(),
     )
 
 
-def _turn_arguments(request: ChatRequest) -> tuple[str | None, str | None, str]:
+def _turn_arguments(request: ChatRequest) -> tuple[str | None, str | None]:
     if request.provider and request.provider not in _configured_providers():
         raise HTTPException(400, f"'{request.provider}' has no API key configured in .env")
 
@@ -146,16 +139,12 @@ def _turn_arguments(request: ChatRequest) -> tuple[str | None, str | None, str]:
             raise HTTPException(400, f"'{model}' is not one of the configured OpenAI-spec models")
         model = model or (allowed[0] if allowed else None)
 
-    try:
-        destination = resolve_ao_destination(request.destination)
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from None
-    return request.provider, model, destination
+    return request.provider, model
 
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
-    provider, model, destination = _turn_arguments(request)
+    provider, model = _turn_arguments(request)
 
     try:
         reply = await asyncio.wait_for(
@@ -164,7 +153,6 @@ async def chat(request: ChatRequest):
                 request.conversation_id,
                 provider=provider,
                 model=model,
-                destination=destination,
             ),
             timeout=CHAT_TIMEOUT_SECONDS,
         )
@@ -183,7 +171,7 @@ async def chat(request: ChatRequest):
 @app.post("/chat/stream")
 async def chat_stream(request: ChatRequest):
     """Stream status events, then the reply. The page shows noodling vs a Splunk tool call."""
-    provider, model, destination = _turn_arguments(request)
+    provider, model = _turn_arguments(request)
 
     queue: asyncio.Queue = asyncio.Queue()
 
@@ -196,7 +184,6 @@ async def chat_stream(request: ChatRequest):
                     request.conversation_id,
                     provider=provider,
                     model=model,
-                    destination=destination,
                 ),
                 timeout=CHAT_TIMEOUT_SECONDS,
             )
