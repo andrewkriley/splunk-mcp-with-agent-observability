@@ -1,14 +1,13 @@
 """Check whether .env has everything needed to participate in the workshop.
 
 Run this after filling in .env to get a readiness report — at least one LLM
-key matching LLM_PROVIDER, a Splunk Agent Observability (Galileo) API key, and a Splunk instance URL +
+key matching LLM_PROVIDER, a Galileo or Observability Cloud destination, and a Splunk instance URL +
 MCP token — instead of discovering a missing value later mid-session.
 """
 
 import os
 import sys
 from pathlib import Path
-from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 
@@ -41,7 +40,7 @@ def main():
     all_ok = True
     if str(REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(REPO_ROOT))
-    from app.observability import galileo_console_url, openai_spec_config
+    from app.observability import ao_destination_errors, ao_destination_target, configured_ao_destinations, openai_spec_config
 
     print("LLM provider")
     provider = os.environ.get("LLM_PROVIDER", "").strip().lower()
@@ -77,20 +76,18 @@ def main():
             key_present[provider],
         )
 
-    print("\nSplunk Agent Observability (Galileo)")
-    all_ok &= check("GALILEO_API_KEY is filled in", bool(os.environ.get("GALILEO_API_KEY", "").strip()))
-
-    try:
-        console_url = galileo_console_url()
-        host = urlsplit(console_url).hostname or console_url
-        overridden = bool(os.environ.get("GALILEO_CONSOLE_URL", "").strip())
-        all_ok &= check(
-            "GALILEO_CONSOLE_URL override" if overridden else "Console URL",
-            True,
-            host if overridden else f"default {host}",
-        )
-    except ValueError as exc:
-        all_ok &= check("GALILEO_CONSOLE_URL is a valid console URL", False, str(exc))
+    print("\nAgent Observability destination")
+    destinations = configured_ao_destinations()
+    labels = {"standalone": "Galileo", "o11y": "Observability Cloud"}
+    all_ok &= check(
+        "At least one destination is configured (Galileo and/or Observability Cloud)",
+        bool(destinations),
+        ", ".join(labels[name] for name in destinations) or "none set",
+    )
+    for name in destinations:
+        all_ok &= check(labels[name], True, ao_destination_target(name))
+    for error in ao_destination_errors():
+        all_ok &= check(error, False)
 
     print("\nSplunk MCP")
     all_ok &= check("SPLUNK_INSTANCE_URL is filled in", bool(os.environ.get("SPLUNK_INSTANCE_URL", "").strip()))

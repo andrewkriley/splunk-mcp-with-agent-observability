@@ -30,19 +30,49 @@ cd splunk-mcp-with-agent-observability
 cp .env.example .env
 ```
 
-Open `.env` and fill in the Splunk Agent Observability (Galileo) section:
+Open `.env` and fill in the Galileo destination:
 
 ```
 GALILEO_API_KEY=<the key you just created>
 GALILEO_PROJECT=splunk-mcp-with-agent-observability
 GALILEO_LOG_STREAM=default
 GALILEO_CONSOLE_URL=
+SPLUNK_AO_DESTINATION=standalone
 ```
 
-Leave `GALILEO_CONSOLE_URL` blank to use the default console, `https://app.galileo.ai`.
-To send traces to another Splunk Agent Observability (Galileo) instance, set the
-full console URL, for example `https://console.multitenant.galileocloud.io`.
-The SDK then calls the matching API host (`console` in the hostname becomes `api`).
+Galileo uses the `GALILEO_*` names. Observability Cloud uses `SPLUNK_AO_REALM`,
+`SPLUNK_AO_O11Y_TOKEN`, `SPLUNK_AO_PROJECT`, and `SPLUNK_AO_AGENT_STREAM`.
+
+Leave the console URL blank to use the default console, `https://app.galileo.ai`.
+To send traces to another standalone instance, set the full console URL, for
+example `https://console.multitenant.galileocloud.io`. The SDK then calls the
+matching API host (`console` or `app` in the hostname becomes `api`).
+
+### Observability Cloud as well
+
+If you also have Agent Observability inside Splunk Observability Cloud, fill in
+the second block. Both can be set at once. The chat page lists each complete
+destination and you pick one per question, the same way you pick an LLM provider.
+`SPLUNK_AO_DESTINATION` (`standalone` or `o11y`) is the one selected when the
+page loads.
+
+```
+SPLUNK_AO_REALM=<realm from app.<realm>.observability.splunkcloud.com>
+SPLUNK_AO_O11Y_TOKEN=<Observability Cloud access token with ingest and API>
+SPLUNK_AO_PROJECT=splunk-mcp-with-agent-observability
+SPLUNK_AO_AGENT_STREAM=default
+```
+
+One token is enough when it has both ingest and API scopes. Add
+`SPLUNK_AO_O11Y_API_TOKEN` only when project calls need a different token.
+
+The SDK builds the console, API, and OTLP ingest hosts from the realm. For
+`au0`, traces go to `https://ingest.au0.observability.splunkcloud.com/v2/trace/otlp`.
+Put the realm in `SPLUNK_AO_REALM`. The ingest host is not a console URL.
+Create the token in Observability Cloud under Settings → Access tokens, with
+ingest permission and the `agent_observability_admin` role if the SDK should
+also create the project and Agent Stream. Details:
+https://agent-observability-docs.splunk.com/references/faqs/find-keys#saas
 
 ## 5. Get your Splunk details from the facilitator
 
@@ -231,9 +261,13 @@ client, Splunk Agent Observability (Galileo) tracing, chat UI).
   a Cloud project access issue, not a bad key. Create a new key at
   https://aistudio.google.com/apikey while signed in with a plain gmail.com
   account instead of a legacy/grandfathered Google Workspace account.
-- **No traces show up in the Splunk Agent Observability (Galileo) dashboard** — confirm `GALILEO_API_KEY`
-  and `GALILEO_PROJECT` are set, and that the app actually ran a turn (traces
-  only appear after a completed request).
+- **No traces show up** — confirm the destination you selected in the chat UI
+  is the one you are looking at. Galileo needs `GALILEO_API_KEY` and
+  `GALILEO_PROJECT`. Observability Cloud needs
+  `SPLUNK_AO_REALM` and `SPLUNK_AO_O11Y_TOKEN`, and the traces are under
+  Agent Observability in that realm, not on the ingest host. Traces appear
+  after a completed request. The server log line `AO selected destination=`
+  names which one that turn used.
 - **Metrics (e.g. `groundedness`, `tool_selection_quality`) stay stuck on
   "queued"/"pending" on every trace, even old ones** — this isn't caused by
   the app or `.env`. Confirmed via the Splunk Agent Observability (Galileo) API: the account's scoring
@@ -255,5 +289,5 @@ client, Splunk Agent Observability (Galileo) tracing, chat UI).
   and none fixed it. Purely a Splunk Agent Observability (Galileo) observability gap — the chat app's
   answers remain correct regardless. (The async-client attempt was reverted
   outright, separately from this issue — it broke OpenAI, since
-  `galileo.openai`'s wrapper doesn't patch the async client. The app now
+  `splunk_ao.openai`'s wrapper doesn't patch the async client. The app now
   uses each provider's sync client, called directly.)
