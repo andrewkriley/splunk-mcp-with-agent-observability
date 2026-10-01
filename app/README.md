@@ -102,7 +102,7 @@ it connects directly.
     a different object with no active trace, silently dropping every LLM
     span.
   - Each provider's async client (`AsyncOpenAI`/`AsyncAnthropic`/`.aio`),
-    awaited in-line — broke OpenAI outright: `splunk_ao.openai`'s wrapper only
+    awaited in-line — broke OpenAI outright: `galileo.openai`'s wrapper only
     patches the sync `Completions.create` (confirmed by reading its
     `OPENAI_CLIENT_METHODS` list), so the async client bypasses it entirely
     and forwards Splunk Agent Observability (Galileo)'s `name=` kwarg straight to the real API, which
@@ -123,16 +123,10 @@ it connects directly.
   identical code path never reproduced it at all. See the `KNOWN ISSUE`
   comment in `observability.py` for the full trail. If you see this during
   the workshop, it's not something wrong with your setup.
-- **`observability.py`** — Each chat request names a destination. Galileo
-  settings stay in `GALILEO_API_KEY`, `GALILEO_CONSOLE_URL`, `GALILEO_PROJECT`,
-  and `GALILEO_LOG_STREAM` (`https://app.galileo.ai` when the console URL is
-  blank). Observability Cloud settings stay in `SPLUNK_AO_REALM`,
-  `SPLUNK_AO_O11Y_TOKEN`, `SPLUNK_AO_PROJECT`, and `SPLUNK_AO_AGENT_STREAM`.
-  Both can be filled in. The SDK rejects a process that has both variable sets
-  at once, so the app publishes only the selected set for that turn and then
-  restores the other. One turn runs at a time so two chats cannot retarget the
-  process mid-flight. OpenAI calls go through the native
-  `splunk_ao.openai` wrapper (auto-logs, no decorator needed), passing
+- **`observability.py`** — Traces go to `https://app.galileo.ai` unless
+  `GALILEO_CONSOLE_URL` is set (for example
+  `https://console.multitenant.galileocloud.io`). OpenAI calls go through Splunk Agent Observability (Galileo)'s native
+  `galileo.openai` wrapper (auto-logs, no decorator needed), passing
   `name="openai"` (or `name="openai-spec"` for an OpenAI-compatible endpoint)
   so its spans are labeled by provider instead of the
   wrapper's generic default (`"llm"`) — that kwarg is captured by Splunk Agent Observability (Galileo)
@@ -156,7 +150,7 @@ it connects directly.
   cached), explicitly calls `start_trace(input=user_message)` /
   `conclude(output=result)` so the trace shows the real question and answer
   rather than an arbitrary child span's input/output, and wraps it all in
-  one `splunk_ao_context(session_id=...)` so every LLM/tool span from that
+  one `galileo_context(session_id=...)` so every LLM/tool span from that
   turn lands in one trace, and every turn in the conversation lands in one
   session.
 

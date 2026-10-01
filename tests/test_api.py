@@ -13,20 +13,6 @@ from app.main import app
 class ChatApiTests(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(app)
-        self.previous_ao_key = os.environ.get("SPLUNK_AO_API_KEY")
-        self.previous_ao_console = os.environ.get("SPLUNK_AO_CONSOLE_URL")
-        os.environ["SPLUNK_AO_API_KEY"] = "test-galileo-key"
-        os.environ["SPLUNK_AO_CONSOLE_URL"] = "https://app.galileo.ai"
-
-    def tearDown(self):
-        if self.previous_ao_key is None:
-            os.environ.pop("SPLUNK_AO_API_KEY", None)
-        else:
-            os.environ["SPLUNK_AO_API_KEY"] = self.previous_ao_key
-        if self.previous_ao_console is None:
-            os.environ.pop("SPLUNK_AO_CONSOLE_URL", None)
-        else:
-            os.environ["SPLUNK_AO_CONSOLE_URL"] = self.previous_ao_console
 
     def test_blank_message_names_the_problem(self):
         response = self.client.post("/chat", json={"message": "   ", "conversation_id": "c1"})
@@ -58,9 +44,6 @@ class ChatApiTests(unittest.TestCase):
         self.assertIn("/chat/stream", html)
         self.assertIn('addMessage("pending", "Noodling...")', html)
         self.assertIn('pending.textContent = "Searching Splunk..."', html)
-        self.assertIn('id="destination"', html)
-        self.assertIn("Observability Cloud", html)
-        self.assertIn("destination: destinationSelect.value || null", html)
 
     def test_timeout_returns_a_readable_504(self):
         async def slow(*_args, **_kwargs):

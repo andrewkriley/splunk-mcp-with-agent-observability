@@ -26,7 +26,6 @@
   header {
     display: flex;
     align-items: center;
-    flex-wrap: wrap;
     gap: 0.75rem;
     padding: 0.75rem 1rem;
     background: var(--panel);
@@ -46,7 +45,7 @@
     margin-top: 0.15rem;
   }
   header .titles { flex: 1; }
-  #destination, #provider, #model {
+  #provider, #model {
     background: var(--bg);
     color: var(--text);
     border: 1px solid var(--border);
@@ -55,7 +54,7 @@
     font-size: 0.82rem;
     max-width: 14rem;
   }
-  #destination:focus, #provider:focus, #model:focus {
+  #provider:focus, #model:focus {
     outline: none;
     border-color: var(--green-bright);
   }
@@ -173,9 +172,6 @@
     <h1>Buttercup Games — AI Ops Assistant</h1>
     <div class="subtitle">Splunk MCP &middot; splunk-mcp-with-agent-observability</div>
   </div>
-  <select id="destination" title="Agent Observability destination" disabled>
-    <option>Loading...</option>
-  </select>
   <select id="provider" title="LLM provider" disabled>
     <option>Loading...</option>
   </select>
@@ -187,22 +183,16 @@
   <input id="message" type="text" maxlength="4000" placeholder="Search> any high severity notables in the last 30 days?" autocomplete="off" required>
   <button id="submit" type="submit" disabled>Search</button>
 </form>
-<footer>Answers are grounded in live Splunk data via MCP, traced to the selected Agent Observability destination.</footer>
+<footer>Answers are grounded in live Splunk data via MCP, traced to Splunk Agent Observability (Galileo).</footer>
 
 <script>
 const log = document.getElementById("log");
 const form = document.getElementById("chat-form");
 const input = document.getElementById("message");
 const submitButton = document.getElementById("submit");
-const destinationSelect = document.getElementById("destination");
 const providerSelect = document.getElementById("provider");
 const modelSelect = document.getElementById("model");
-const conversationId = crypto.randomUUID(); // one session per page load, per selected destination
-
-const DESTINATION_LABELS = {
-  standalone: "Galileo",
-  o11y: "Observability Cloud",
-};
+const conversationId = crypto.randomUUID(); // one Splunk Agent Observability (Galileo) session per page load
 
 const PROVIDER_LABELS = {
   anthropic: "Anthropic",
@@ -237,21 +227,7 @@ async function loadProviders() {
   try {
     const response = await fetch("/config");
     if (!response.ok) throw new Error(await errorDetail(response));
-    const { providers, default_provider, openai_spec_models, destinations, default_destination } = await response.json();
-    destinationSelect.innerHTML = "";
-    for (const destination of destinations || []) {
-      const option = document.createElement("option");
-      option.value = destination;
-      option.textContent = DESTINATION_LABELS[destination] || destination;
-      if (destination === default_destination) option.selected = true;
-      destinationSelect.appendChild(option);
-    }
-    if (!destinationSelect.options.length) {
-      destinationSelect.innerHTML = '<option value="">unavailable</option>';
-      addMessage("assistant", "No Agent Observability destination is configured in .env");
-      return;
-    }
-    destinationSelect.disabled = false;
+    const { providers, default_provider, openai_spec_models } = await response.json();
     providerSelect.innerHTML = "";
     for (const provider of providers) {
       const option = document.createElement("option");
@@ -272,7 +248,6 @@ async function loadProviders() {
     showModelList(providerSelect.value);
     submitButton.disabled = false;
   } catch (err) {
-    destinationSelect.innerHTML = '<option value="">unavailable</option>';
     providerSelect.innerHTML = '<option value="">unavailable</option>';
     addMessage("assistant", `Could not load configured LLM providers: ${err.message}`);
   }
@@ -339,7 +314,6 @@ form.addEventListener("submit", async (event) => {
         conversation_id: conversationId,
         provider: providerSelect.value || null,
         model: modelSelect.hidden ? null : modelSelect.value,
-        destination: destinationSelect.value || null,
       }),
     });
     if (!response.ok) throw new Error(await errorDetail(response));

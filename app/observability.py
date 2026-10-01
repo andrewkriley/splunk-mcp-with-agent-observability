@@ -1,22 +1,16 @@
-"""Splunk Agent Observability instrumentation for the workshop chat agent.
+"""Splunk Agent Observability (Galileo) instrumentation for the workshop chat agent.
 
-The SDK ships a native import-swap wrapper for OpenAI (`splunk_ao.openai`)
+Splunk Agent Observability (Galileo) only ships a native import-swap wrapper for OpenAI (`galileo.openai`)
 — it auto-logs every call, no decorator needed. Anthropic and Gemini have no
 such wrapper, so those calls build their span by hand via
-`add_llm_span(...)` — not the `@log(span_type="llm")`
+`GalileoLogger.add_llm_span(...)` — not the `@log(span_type="llm")`
 decorator, which generically dumps every function argument (including
 `system_prompt` as a stray key, and provider-specific response shapes like
 Anthropic's `thinking` blocks) into the span rather than a clean message
 list. Splunk MCP tool calls still use `@log(span_type="tool")`, which
 doesn't have this problem — its input/output are already simple. The whole
-turn is wrapped in one `splunk_ao_context` so every LLM/tool span lands in a
+turn is wrapped in one `galileo_context` so every LLM/tool span lands in a
 single trace.
-
-Two destinations can be configured at once. `standalone` is legacy Galileo
-(API key + console URL). `o11y` is Splunk Observability Cloud Agent
-Observability (realm + ingest token). The SDK refuses to start when both
-sets of variables are present, so each turn publishes only the selected
-destination into the environment and restores the rest afterward.
 """
 
 import asyncio
@@ -24,16 +18,12 @@ import contextvars
 import json
 import logging
 import os
-import re
 import time
 from collections import OrderedDict
-from collections.abc import Iterator
-from contextlib import contextmanager
 from urllib.parse import urlsplit
 
-from splunk_ao import log, splunk_ao_context, start_session
-from splunk_ao.config import SplunkAOConfig
-from splunk_ao.constants import DEFAULT_CONSOLE_URL
+from galileo import galileo_context, log, start_session
+from galileo.constants import DEFAULT_CONSOLE_URL
 
 from app import mcp_client
 
@@ -41,13 +31,8 @@ from app import mcp_client
 _mcp_session: contextvars.ContextVar = contextvars.ContextVar("splunk_mcp_session")
 # Optional queue for the chat page: "model" while the LLM runs, "tool" on a Splunk call.
 _activity: contextvars.ContextVar[asyncio.Queue | None] = contextvars.ContextVar("chat_activity", default=None)
-# (destination, conversation_id) -> session id, so every turn in one browser
-# conversation lands in one session on the destination selected for that turn.
-_ao_sessions: dict[tuple[str, str], str] = {}
-# Held for a whole turn. The SDK reads its destination from process environment,
-# so two overlapping chats cannot publish different destinations at once.
-_destination_lock = asyncio.Lock()
-_remembered_secrets: list[str] = []
+_galileo_sessions: dict[str, str] = {}  # conversation_id -> Splunk Agent Observability (Galileo) session_id, so every
+                                          # turn in one browser conversation lands in one session
 
 # Prior user/assistant text only. Tool transcripts stay inside the turn that made them.
 MAX_HISTORY_TURNS = 8
@@ -98,199 +83,33 @@ def remember_turn(conversation_id: str, user_message: str, reply: str) -> None:
         _history.popitem(last=False)
 
 
-AO_DESTINATIONS = ("standalone", "o11y")
-_REALM_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,31}$")
-_STANDALONE_ENV = ("SPLUNK_AO_API_KEY", "SPLUNK_AO_CONSOLE_URL", "SPLUNK_AO_API_URL")
-_O11Y_ENV = ("SPLUNK_AO_REALM", "SPLUNK_AO_O11Y_TOKEN", "SPLUNK_AO_O11Y_API_TOKEN")
-_SHARED_ENV = ("SPLUNK_AO_PROJECT", "SPLUNK_AO_AGENT_STREAM")
-# The SDK keeps an existing GALILEO_* value even when it is blank, and that
-# value wins over the SPLUNK_AO_* names published for the selected turn.
-_GALILEO_HELD_ENV = (
-    "GALILEO_API_KEY",
-    "GALILEO_API_URL",
-    "GALILEO_CONSOLE_URL",
-    "GALILEO_PROJECT",
-    "GALILEO_PROJECT_ID",
-    "GALILEO_LOG_STREAM",
-    "GALILEO_LOG_STREAM_ID",
-)
-
-
-def _env(name: str) -> str:
-    return os.environ.get(name, "").strip()
-
-
-def _first_env(*names: str) -> str:
-    for name in names:
-        value = _env(name)
-        if value:
-            return value
-    return ""
-
-
-def _remember_secret(value: str) -> None:
-    if value and value not in _remembered_secrets:
-        _remembered_secrets.append(value)
-
-
-def _http_url(value: str, label: str) -> str:
-    raw = value.strip()
-    if "://" not in raw:
-        raw = f"https://{raw}"
-    parsed = urlsplit(raw)
-    if parsed.scheme not in {"https", "http"} or not parsed.hostname:
-        raise ValueError(f"{label} must be an http(s) URL with a host")
-    if parsed.username or parsed.password:
-        raise ValueError(f"{label} must not include a username or password")
-    return raw.rstrip("/")
-
-
-def ao_project(destination: str) -> str:
-    """Project name for one destination. Each destination keeps its own env var."""
-    if destination == "standalone":
-        chosen = _first_env("GALILEO_PROJECT", "SPLUNK_AO_PROJECT")
-    else:
-        chosen = _first_env("SPLUNK_AO_PROJECT", "GALILEO_PROJECT")
-    return chosen or "splunk-mcp-with-agent-observability"
-
-
-def ao_agent_stream(destination: str) -> str:
-    """Agent Stream for one destination. Galileo calls this a log stream."""
-    if destination == "standalone":
-        chosen = _first_env("GALILEO_LOG_STREAM", "SPLUNK_AO_AGENT_STREAM")
-    else:
-        chosen = _first_env("SPLUNK_AO_AGENT_STREAM", "GALILEO_LOG_STREAM")
-    return chosen or "default"
-
-
-def _standalone_settings() -> tuple[dict[str, str] | None, str | None]:
-    """Env to publish for Galileo, or None when that destination is not configured."""
-    api_key = _first_env("SPLUNK_AO_API_KEY", "GALILEO_API_KEY")
-    console_raw = _first_env("SPLUNK_AO_CONSOLE_URL", "GALILEO_CONSOLE_URL")
-    api_url_raw = _env("SPLUNK_AO_API_URL")
-    if not api_key and not console_raw and not api_url_raw:
-        return None, None
-    if not api_key:
-        return None, "Standalone Agent Observability needs SPLUNK_AO_API_KEY or GALILEO_API_KEY"
-    try:
-        console_url = _http_url(console_raw, "Console URL") if console_raw else str(DEFAULT_CONSOLE_URL).rstrip("/")
-        published = {"SPLUNK_AO_API_KEY": api_key, "SPLUNK_AO_CONSOLE_URL": console_url}
-        if api_url_raw:
-            published["SPLUNK_AO_API_URL"] = _http_url(api_url_raw, "SPLUNK_AO_API_URL")
-    except ValueError as exc:
-        return None, str(exc)
-    _remember_secret(api_key)
-    return published, None
-
-
-def _o11y_settings() -> tuple[dict[str, str] | None, str | None]:
-    """Env to publish for Observability Cloud, or None when that destination is not configured."""
-    realm = _env("SPLUNK_AO_REALM")
-    token = _env("SPLUNK_AO_O11Y_TOKEN")
-    api_token = _env("SPLUNK_AO_O11Y_API_TOKEN")
-    if not realm and not token and not api_token:
-        return None, None
-    if not realm or not _REALM_RE.fullmatch(realm):
-        return None, "SPLUNK_AO_REALM must be the Observability Cloud realm, such as au0"
-    if not token:
-        return None, "Observability Cloud trace export needs SPLUNK_AO_O11Y_TOKEN"
-    published = {"SPLUNK_AO_REALM": realm, "SPLUNK_AO_O11Y_TOKEN": token}
-    # A second copy of the same token does not change auth. Publish it only when it differs.
-    if api_token and api_token != token:
-        published["SPLUNK_AO_O11Y_API_TOKEN"] = api_token
-        _remember_secret(api_token)
-    _remember_secret(token)
-    return published, None
-
-
-def ao_destination_errors() -> list[str]:
-    errors = [error for _settings, error in (_standalone_settings(), _o11y_settings()) if error]
-    requested = _env("SPLUNK_AO_DESTINATION").lower()
-    if requested and requested not in AO_DESTINATIONS:
-        errors.append("SPLUNK_AO_DESTINATION must be standalone or o11y")
-    elif requested and requested not in configured_ao_destinations():
-        errors.append(f"SPLUNK_AO_DESTINATION={requested} is not configured")
-    return errors
-
-
-def configured_ao_destinations() -> list[str]:
-    ready = []
-    standalone, standalone_error = _standalone_settings()
-    o11y, o11y_error = _o11y_settings()
-    if standalone and not standalone_error:
-        ready.append("standalone")
-    if o11y and not o11y_error:
-        ready.append("o11y")
-    return ready
-
-
-def default_ao_destination() -> str:
-    configured = configured_ao_destinations()
+def galileo_console_url() -> str:
+    """Console to log to. Blank GALILEO_CONSOLE_URL keeps the SDK default."""
+    configured = os.environ.get("GALILEO_CONSOLE_URL", "").strip()
     if not configured:
-        raise ValueError("No Agent Observability destination is configured in .env")
-    requested = _env("SPLUNK_AO_DESTINATION").lower()
-    if requested in configured:
-        return requested
-    return configured[0]
+        return str(DEFAULT_CONSOLE_URL).rstrip("/")
+
+    value = configured if "://" in configured else f"https://{configured}"
+    parsed = urlsplit(value)
+    if parsed.scheme not in {"https", "http"} or not parsed.hostname:
+        raise ValueError("GALILEO_CONSOLE_URL must be an http(s) URL with a host")
+    if parsed.username or parsed.password:
+        raise ValueError("GALILEO_CONSOLE_URL must not include a username or password")
+    return value.rstrip("/")
 
 
-def resolve_ao_destination(requested: str | None) -> str:
-    choice = (requested or "").strip().lower()
-    if not choice:
-        return default_ao_destination()
-    if choice not in AO_DESTINATIONS:
-        raise ValueError(f"Unknown Agent Observability destination '{choice}'.")
-    if choice not in configured_ao_destinations():
-        raise ValueError(f"'{choice}' is not configured in .env")
-    return choice
+def apply_galileo_console_url() -> str:
+    """Publish a validated override before the SDK reads GALILEO_CONSOLE_URL."""
+    url = galileo_console_url()
+    if os.environ.get("GALILEO_CONSOLE_URL", "").strip():
+        os.environ["GALILEO_CONSOLE_URL"] = url
+    return url
 
 
-def ao_destination_target(destination: str) -> str:
-    """Host or realm the selected destination exports to. No secrets."""
-    if destination == "o11y":
-        settings, _error = _o11y_settings()
-        realm = (settings or {}).get("SPLUNK_AO_REALM", "")
-        return f"ingest.{realm}.observability.splunkcloud.com" if realm else ""
-    settings, _error = _standalone_settings()
-    console = (settings or {}).get("SPLUNK_AO_CONSOLE_URL", "")
-    return urlsplit(console).hostname or console
-
-
-@contextmanager
-def activate_ao_destination(destination: str) -> Iterator[None]:
-    """Publish one destination's SDK variables and hide the other set."""
-    choice = resolve_ao_destination(destination)
-    settings = _standalone_settings()[0] if choice == "standalone" else _o11y_settings()[0]
-    if not settings:
-        raise ValueError(f"'{choice}' is not configured in .env")
-    project = ao_project(choice)
-    agent_stream = ao_agent_stream(choice)
-    target = ao_destination_target(choice)
-    managed = (*_STANDALONE_ENV, *_O11Y_ENV, *_SHARED_ENV, *_GALILEO_HELD_ENV)
-    previous = {name: os.environ.get(name) for name in managed}
-    try:
-        for name in managed:
-            os.environ.pop(name, None)
-        os.environ.update(settings)
-        os.environ["SPLUNK_AO_PROJECT"] = project
-        os.environ["SPLUNK_AO_AGENT_STREAM"] = agent_stream
-        # A previous turn may have cached the other destination's client.
-        SplunkAOConfig._instance = None
-        _llm_log.info("AO selected destination=%s target=%s", choice, target)
-        yield
-    finally:
-        for name, value in previous.items():
-            if value is None:
-                os.environ.pop(name, None)
-            else:
-                os.environ[name] = value
-
-
-def _ao_session_id(conversation_id: str, destination: str) -> str:
-    key = (destination, conversation_id)
-    if key not in _ao_sessions:
-        _ao_sessions[key] = start_session(name=f"workshop-chat-{conversation_id}")
-    return _ao_sessions[key]
+def _galileo_session_id(conversation_id: str) -> str:
+    if conversation_id not in _galileo_sessions:
+        _galileo_sessions[conversation_id] = start_session(name=f"workshop-chat-{conversation_id}")
+    return _galileo_sessions[conversation_id]
 
 
 OPENAI_MODEL = "gpt-4o"
@@ -314,9 +133,6 @@ _SECRET_ENV_VARS = (
     "GEMINI_API_KEY",
     "GALILEO_API_KEY",
     "OPENAI_SPEC_API_KEY",
-    "SPLUNK_AO_API_KEY",
-    "SPLUNK_AO_O11Y_TOKEN",
-    "SPLUNK_AO_O11Y_API_TOKEN",
 )
 _MAX_LOGGED_MESSAGE_CHARS = 4000
 
@@ -338,10 +154,10 @@ def log_llm_use(kind: str, provider: str, model: str, endpoint: str) -> None:
 
 
 def _redact_secrets(text: str, extra: tuple[str, ...] = ()) -> str:
-    secrets = [os.environ.get(name, "").strip() for name in _SECRET_ENV_VARS]
-    secrets.extend(_remembered_secrets)
-    secrets.extend(extra)
-    for secret in secrets:
+    for secret in [os.environ.get(name, "").strip() for name in _SECRET_ENV_VARS]:
+        if secret:
+            text = text.replace(secret, "[redacted]")
+    for secret in extra:
         if secret:
             text = text.replace(secret, "[redacted]")
     return text
@@ -476,9 +292,9 @@ def call_openai(
     base_url: str | None = None,
     name: str = "openai",
 ):
-    from splunk_ao.openai import openai  # auto-logs every call, no decorator needed
+    from galileo.openai import openai  # auto-logs every call, no decorator needed
 
-    # Sync client on purpose: splunk_ao.openai's wrapper only patches
+    # Sync client on purpose: galileo.openai's wrapper only patches
     # `openai.resources.chat.completions.Completions.create` (confirmed by
     # reading its OPENAI_CLIENT_METHODS list) — there's no entry for
     # AsyncCompletions at all in this installed version. Using AsyncOpenAI
@@ -563,7 +379,7 @@ def call_anthropic(messages: list[dict], tools: list[dict], system_prompt: str):
     # than a clean message list, since it doesn't know Anthropic keeps
     # `system` separate from `messages`. The real API call above still gets
     # the full `messages` history; only the logged copy is bounded.
-    splunk_ao_context.get_logger_instance().add_llm_span(
+    galileo_context.get_logger_instance().add_llm_span(
         input=[{"role": "system", "content": system_prompt}, *messages[-_MAX_LOGGED_TURNS:]],
         output=_anthropic_content_to_log(response.content),
         model=ANTHROPIC_MODEL,
@@ -645,7 +461,7 @@ def call_gemini(contents: list, tools: list[dict], system_prompt: str):
     ]
     logged_output = _gemini_content_text(response.candidates[0].content) if response.candidates else (response.text or "")
     usage = response.usage_metadata
-    splunk_ao_context.get_logger_instance().add_llm_span(
+    galileo_context.get_logger_instance().add_llm_span(
         input=logged_input,
         output=logged_output,
         model=GEMINI_MODEL,
@@ -665,54 +481,48 @@ async def call_splunk_tool(tool_name: str, arguments: dict) -> str:
 
 
 async def run_traced_turn(
-    user_message: str,
-    conversation_id: str,
-    provider: str | None = None,
-    model: str | None = None,
-    destination: str | None = None,
+    user_message: str, conversation_id: str, provider: str | None = None, model: str | None = None
 ) -> str:
     from app.agent import _needs_splunk, run_agent_turn
 
-    destination = resolve_ao_destination(destination)
+    apply_galileo_console_url()
     history = prior_turns(conversation_id)
     use_splunk = _needs_splunk(user_message, history)
-    async with _destination_lock:
-        with activate_ao_destination(destination):
-            with splunk_ao_context(
-                project=ao_project(destination),
-                agent_stream=ao_agent_stream(destination),
-                session_id=_ao_session_id(conversation_id, destination),
-            ):
-                # Without an explicit start_trace/conclude, the SDK lazily creates the
-                # trace from whichever child span happens to log first — so the trace's
-                # own input/output end up being an arbitrary tool call or LLM message
-                # list instead of the actual user question and final answer.
-                logger = splunk_ao_context.get_logger_instance()
-                logger.start_trace(input=user_message)
+    with galileo_context(
+        project=os.environ.get("GALILEO_PROJECT", "splunk-mcp-with-agent-observability"),
+        log_stream=os.environ.get("GALILEO_LOG_STREAM", "default"),
+        session_id=_galileo_session_id(conversation_id),
+    ):
+        # Without an explicit start_trace/conclude, Splunk Agent Observability (Galileo) lazily creates the
+        # trace from whichever child span happens to log first — so the trace's
+        # own input/output end up being an arbitrary tool call or LLM message
+        # list instead of the actual user question and final answer.
+        logger = galileo_context.get_logger_instance()
+        logger.start_trace(input=user_message)
 
-                if use_splunk:
-                    async with mcp_client.splunk_mcp_session() as session:
-                        set_mcp_session(session)
-                        tools = await mcp_client.list_splunk_tools(session)
-                        result = await run_agent_turn(
-                            user_message,
-                            tools,
-                            provider=provider,
-                            history=history,
-                            model=model,
-                        )
-                else:
-                    mcp_client.log_mcp_skipped()
-                    result = await run_agent_turn(
-                        user_message,
-                        [],
-                        provider=provider,
-                        history=history,
-                        model=model,
-                        use_splunk=False,
-                    )
+        if use_splunk:
+            async with mcp_client.splunk_mcp_session() as session:
+                set_mcp_session(session)
+                tools = await mcp_client.list_splunk_tools(session)
+                result = await run_agent_turn(
+                    user_message,
+                    tools,
+                    provider=provider,
+                    history=history,
+                    model=model,
+                )
+        else:
+            mcp_client.log_mcp_skipped()
+            result = await run_agent_turn(
+                user_message,
+                [],
+                provider=provider,
+                history=history,
+                model=model,
+                use_splunk=False,
+            )
 
-                logger.conclude(output=result)
-                splunk_ao_context.flush()
-                remember_turn(conversation_id, user_message, result)
-                return result
+        logger.conclude(output=result)
+        galileo_context.flush()
+        remember_turn(conversation_id, user_message, result)
+        return result

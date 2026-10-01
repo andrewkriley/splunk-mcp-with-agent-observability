@@ -52,7 +52,7 @@ import json
 import os
 import re
 
-from splunk_ao import log, splunk_ao_context
+from galileo import galileo_context, log
 
 from app import observability
 
@@ -190,7 +190,7 @@ async def _run_worker(
     history: list[dict],
     model: str | None = None,
 ) -> tuple[str, int]:
-    logger = splunk_ao_context.get_logger_instance()
+    logger = galileo_context.get_logger_instance()
     system_prompt = CATEGORY_PROMPTS[category]
     scoped_tools = _scoped_tools(mcp_tools, category)
 
@@ -223,7 +223,7 @@ async def run_agent_turn(
     history = list(history or [])
     selected_provider, selected_model, endpoint = observability.describe_llm(provider, model)
     observability.log_llm_use("selected", selected_provider, selected_model, endpoint)
-    logger = splunk_ao_context.get_logger_instance()
+    logger = galileo_context.get_logger_instance()
 
     logger.add_agent_span(input=user_message, name="supervisor", agent_type="supervisor")
 

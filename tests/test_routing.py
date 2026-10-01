@@ -103,10 +103,9 @@ class IntentGateTests(unittest.TestCase):
             return "direct answer"
 
         with (
-            patch("app.observability.resolve_ao_destination", return_value="standalone"),
-            patch("app.observability.activate_ao_destination"),
-            patch("app.observability._ao_session_id", return_value="sess"),
-            patch("app.observability.splunk_ao_context", galileo),
+            patch("app.observability.apply_galileo_console_url"),
+            patch("app.observability._galileo_session_id", return_value="sess"),
+            patch("app.observability.galileo_context", galileo),
             patch("app.observability.mcp_client.splunk_mcp_session") as session,
             patch("app.agent.run_agent_turn", fake_turn),
         ):
@@ -134,10 +133,9 @@ class IntentGateTests(unittest.TestCase):
             return "3 notables"
 
         with (
-            patch("app.observability.resolve_ao_destination", return_value="standalone"),
-            patch("app.observability.activate_ao_destination"),
-            patch("app.observability._ao_session_id", return_value="sess"),
-            patch("app.observability.splunk_ao_context", galileo),
+            patch("app.observability.apply_galileo_console_url"),
+            patch("app.observability._galileo_session_id", return_value="sess"),
+            patch("app.observability.galileo_context", galileo),
             patch("app.observability.mcp_client.splunk_mcp_session", return_value=session),
             patch("app.observability.mcp_client.list_splunk_tools", AsyncMock(return_value=tools)),
             patch("app.agent.run_agent_turn", fake_turn),
@@ -167,7 +165,7 @@ class IntentGateTests(unittest.TestCase):
 
         tools = [{"name": "splunk_run_query", "description": "", "input_schema": {}}]
         with (
-            patch("app.agent.splunk_ao_context") as galileo,
+            patch("app.agent.galileo_context") as galileo,
             patch("app.observability.call_openai", fake_openai),
         ):
             galileo.get_logger_instance.return_value = MagicMock()
