@@ -16,7 +16,15 @@ from pydantic import BaseModel, Field, field_validator
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
-from app.observability import bind_activity, openai_spec_config, reset_activity, run_traced_turn  # noqa: E402 — import after load_dotenv sets env vars
+from app.observability import (  # noqa: E402 — import after load_dotenv sets env vars
+    bind_activity,
+    configured_ao_destinations,
+    default_ao_destination,
+    openai_spec_config,
+    reset_activity,
+    resolve_ao_destination,
+    run_traced_turn,
+)
 
 app = FastAPI(title="splunk-mcp-with-agent-observability")
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
@@ -33,6 +41,9 @@ _SECRET_ENV_VARS = (
     "GEMINI_API_KEY",
     "GALILEO_API_KEY",
     "OPENAI_SPEC_API_KEY",
+    "SPLUNK_AO_API_KEY",
+    "SPLUNK_AO_O11Y_TOKEN",
+    "SPLUNK_AO_O11Y_API_TOKEN",
 )
 MAX_MESSAGE_CHARS = 4000
 CHAT_TIMEOUT_SECONDS = 180
@@ -43,6 +54,7 @@ class ChatRequest(BaseModel):
     conversation_id: str = Field(min_length=1, max_length=128)
     provider: str | None = None
     model: str | None = Field(default=None, max_length=128)
+    destination: str | None = Field(default=None, max_length=32)
 
     @field_validator("message")
     @classmethod
@@ -74,6 +86,8 @@ class ConfigResponse(BaseModel):
     providers: list[str]
     default_provider: str
     openai_spec_models: list[str] = []
+    destinations: list[str] = []
+    default_destination: str = ""
 
 
 def _configured_providers() -> list[str]:
@@ -107,15 +121,21 @@ async def config():
 
     env_default = os.environ.get("LLM_PROVIDER", "").strip()
     default_provider = env_default if env_default in providers else providers[0]
+    destinations = configured_ao_destinations()
+    try:
+        default_destination = default_ao_destination() if destinations else ""
+    except ValueError:
+        default_destination = ""
     return ConfigResponse(
         providers=providers,
         default_provider=default_provider,
         openai_spec_models=_openai_spec_models(),
+        destinations=destinations,
+        default_destination=default_destination,
     )
 
 
-@app.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
+def _turn_arguments(request: ChatRequest) -> tuple[str | None, str | None, str]:
     if request.provider and request.provider not in _configured_providers():
         raise HTTPException(400, f"'{request.provider}' has no API key configured in .env")
 
@@ -127,9 +147,24 @@ async def chat(request: ChatRequest):
         model = model or (allowed[0] if allowed else None)
 
     try:
+        destination = resolve_ao_destination(request.destination)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+    return request.provider, model, destination
+
+
+@app.post("/chat", response_model=ChatResponse)
+async def chat(request: ChatRequest):
+    provider, model, destination = _turn_arguments(request)
+
+    try:
         reply = await asyncio.wait_for(
             run_traced_turn(
-                request.message, request.conversation_id, provider=request.provider, model=model
+                request.message,
+                request.conversation_id,
+                provider=provider,
+                model=model,
+                destination=destination,
             ),
             timeout=CHAT_TIMEOUT_SECONDS,
         )
@@ -148,15 +183,7 @@ async def chat(request: ChatRequest):
 @app.post("/chat/stream")
 async def chat_stream(request: ChatRequest):
     """Stream status events, then the reply. The page shows noodling vs a Splunk tool call."""
-    if request.provider and request.provider not in _configured_providers():
-        raise HTTPException(400, f"'{request.provider}' has no API key configured in .env")
-
-    model = request.model
-    if request.provider == "openai-spec":
-        allowed = _openai_spec_models()
-        if model and model not in allowed:
-            raise HTTPException(400, f"'{model}' is not one of the configured OpenAI-spec models")
-        model = model or (allowed[0] if allowed else None)
+    provider, model, destination = _turn_arguments(request)
 
     queue: asyncio.Queue = asyncio.Queue()
 
@@ -165,7 +192,11 @@ async def chat_stream(request: ChatRequest):
         try:
             reply = await asyncio.wait_for(
                 run_traced_turn(
-                    request.message, request.conversation_id, provider=request.provider, model=model
+                    request.message,
+                    request.conversation_id,
+                    provider=provider,
+                    model=model,
+                    destination=destination,
                 ),
                 timeout=CHAT_TIMEOUT_SECONDS,
             )
