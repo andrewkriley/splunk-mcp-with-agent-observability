@@ -76,6 +76,13 @@ def main():
             key_present[provider],
         )
 
+    intent_mode = os.environ.get("SPLUNK_INTENT_MODE", "keywords").strip().lower() or "keywords"
+    all_ok &= check(
+        "SPLUNK_INTENT_MODE is keywords, model, or both",
+        intent_mode in {"keywords", "model", "both"},
+        intent_mode,
+    )
+
     print("\nObservability Cloud")
     configured = o11y_configured()
     detail = o11y_target() if configured else (o11y_errors()[0] if o11y_errors() else "not configured")

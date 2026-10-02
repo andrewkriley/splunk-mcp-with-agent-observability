@@ -20,22 +20,35 @@ A small web app with a chat interface, backed by an AI agent that:
    from the same page load are included with the new question, so a follow-up
    can refer to the previous answer. Reloading the page starts a fresh
    conversation.
-2. Decides whether the question needs Splunk. A whole-word check looks at
-   this message and recent user turns for security, infra, or explicit Splunk
-   words (`splunk`, `index`, `search`, `oidemo`, `infra`, `security`, `threats`,
-   `events`). A match opens Splunk MCP and
-   classifies the question as security, infra, both, or general. Each match
-   gets its own worker with a scoped system prompt and tool subset. When more
-   than one category matches, a synthesis call with no tools combines their
-   findings into one answer. A question with no Splunk intent skips MCP and
-   gets a direct answer from the model.
+2. Decides whether the question needs Splunk. `SPLUNK_INTENT_MODE` selects
+   the gate, and the server log names which path ran:
+   `Intent source=keyword-list` or `Intent source=model-router`.
+   - `keywords` uses a whole-word list (`splunk`, `index`, `search`,
+     `oidemo`, `notable`, `infra`, `security`, `threats`, `events`, and the
+     other security and infra words in `app/agent.py`). A typo such as
+     `noteables` does not match.
+   - `model` asks the selected LLM for yes or no on every question.
+   - `both` uses the list when it matches, and asks the model only when the
+     list misses, so `noteables` can still open Splunk.
+   If the variable is unset or not one of those three values, the app uses
+   the list. If the router errors or does not answer yes or no, the list
+   result is used. A yes opens Splunk MCP and classifies the question as
+   security, infra, both, or general. Each match gets its own worker with a
+   scoped system prompt and tool subset. When more than one category matches,
+   a synthesis call with no tools combines their findings into one answer. A
+   question with no Splunk intent skips MCP and gets a direct answer from
+   the model.
 3. Each worker calls an LLM API (Anthropic, OpenAI, Gemini, or an OpenAI-spec
    endpoint — your own key) to reason about the question. A dropdown in the
    chat UI switches between whichever of those you have configured, per turn.
    Anthropic, OpenAI, and Gemini each use one model hardcoded in
    `app/observability.py`: `claude-sonnet-5`, `gpt-4o`, and `gemini-3.6-flash`.
    For an OpenAI-spec endpoint, a second dropdown lists the models from
-   `OPENAI_SPEC_MODELS`, and the selected model is the one that is called.
+   `OPENAI_SPEC_MODELS`, and the selected model is the one that is called,
+   including the yes/no intent router. An OpenAI-spec model such as
+   `granite-8b` has a 4096-token window. Tool results sent back to that
+   model are capped, and the log warns with `Context window:` when a call
+   is estimated at 75% of that window or when a tool result is truncated.
 4. When the question has Splunk intent, lets the LLM call tools exposed by a
    **Splunk MCP server** to query your Splunk instance, with two safety nets
    against a stuck agent: a round cap, and a guard that stops if the model repeats an
@@ -53,10 +66,13 @@ A small web app with a chat interface, backed by an AI agent that:
  Browser (chat UI)
        │
        ▼
-   FastAPI app ──► supervisor agent ──► classifier (keyword categories)
+   FastAPI app ──► intent gate (keyword list and/or model router)
        │                 │
        │                 ▼
-       │           worker agent(s) ──► LLM API (Anthropic / OpenAI / Gemini)
+       │           supervisor agent ──► classifier (keyword categories)
+       │                 │
+       │                 ▼
+       │           worker agent(s) ──► LLM API (Anthropic / OpenAI / Gemini / OpenAI-spec)
        │                 │                     │
        │                 │                     ▼ (tool calls)
        │                 └───────────► Splunk MCP server ──► your Splunk instance
@@ -123,15 +139,20 @@ load, so each follow-up still has the earlier turn. The pending line says
 while a Splunk tool call is running.
 
 1. **Is the model responding?**
-   No Splunk words, so this does not open MCP. You should see **Noodling...**
-   and a direct answer. That confirms the selected provider and model are
+   This does not open MCP. With `keywords`, nothing in the list matches.
+   With `both` or `model`, the model router answers no. You should see
+   **Noodling...** and a direct answer, and the log should say
+   `decision=skip`. That confirms the selected provider and model are
    working before any search.
 
 2. **What indexes are available?**
-   `indexes` is a Splunk intent word, so this opens MCP and the line should
-   switch to **Searching Splunk...**. Expect the workshop indexes `oidemo`
-   and `oidemo_notable`, plus Splunk's own internal indexes such as
-   `_internal` and `_audit`.
+   `indexes` is on the static list, so `keywords` and `both` open MCP from
+   the list (`source=keyword-list`) and the line should switch to
+   **Searching Splunk...**. Expect the workshop indexes `oidemo` and
+   `oidemo_notable`, plus Splunk's own internal indexes such as `_internal`
+   and `_audit`. A misspelling such as "what noteables do we have" misses
+   the list; with `both` or `model` the router can still open MCP
+   (`source=model-router`).
 
 3. **What type of data is in these indexes?**
    A follow-up on the same page. `oidemo` is datacenter telemetry (PDU power,

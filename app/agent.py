@@ -1,9 +1,11 @@
 """Supervisor -> classifier -> scoped worker(s): the agent structure for one chat turn.
 
-For each turn: a "supervisor" agent span wraps the whole thing. A whole-word
-keyword check decides whether this question, or an earlier user turn in the
-same conversation, is about Splunk. If it is not, the turn is one chat worker
-with no tools and Splunk MCP is not opened. If it is, a "classifier" agent
+For each turn: a "supervisor" agent span wraps the whole thing. Whether the
+question needs Splunk is decided by SPLUNK_INTENT_MODE: the static keyword
+list, a yes/no call to the selected model, or both (the list wins on a hit,
+and the model is asked only when the list misses). If it is not a Splunk
+question, the turn is one chat worker with no tools and Splunk MCP is not
+opened. If it is, a "classifier" agent
 span (the same keyword heuristic, not an LLM call — keeps this deterministic
 and free of extra API cost/latency) picks one or more categories
 (security/infra/general) — a prompt can touch more than one, e.g.
@@ -49,6 +51,7 @@ observability gap only; the chat app's answers are correct regardless.
 """
 
 import json
+import logging
 import os
 import re
 
@@ -151,17 +154,125 @@ SPLUNK_INTENT_KEYWORDS = [
 ]
 
 
+INTENT_MODES = ("keywords", "model", "both")
+INTENT_ROUTER_SYSTEM = """\
+You decide if a workshop question needs a live search of the user's Splunk data.
+Reply with one word: yes or no.
+Say yes for indexes, events, metrics, security alerts, or notable events, including misspellings such as noteables for notables.
+Say no for greetings, questions about you, or anything that does not need their Splunk data.
+"""
+
+_intent_log = logging.getLogger("app.llm")
+
+
+def intent_mode() -> str:
+    """keywords, model, or both. An unknown value stays on the static list."""
+    mode = os.environ.get("SPLUNK_INTENT_MODE", "keywords").strip().lower()
+    return mode if mode in INTENT_MODES else "keywords"
+
+
 def _matches_any(text: str, keywords: list[str]) -> bool:
     return any(re.search(rf"\b{re.escape(keyword)}\b", text, flags=re.IGNORECASE) for keyword in keywords)
 
 
-def _needs_splunk(user_message: str, history: list[dict] | None = None) -> bool:
-    """True when this question or a recent user turn is a Splunk data question."""
+def _keyword_needs_splunk(user_message: str, history: list[dict] | None = None) -> bool:
     texts = [user_message]
     for message in history or []:
         if message.get("role") == "user":
             texts.append(message.get("content") or "")
     return any(_matches_any(text, SPLUNK_INTENT_KEYWORDS) for text in texts)
+
+
+def _parse_yes_no(text: str) -> bool | None:
+    match = re.match(r"\s*(yes|no)\b", text, flags=re.IGNORECASE)
+    if match is None:
+        match = re.search(r"\b(yes|no)\b", text, flags=re.IGNORECASE)
+    if match is None:
+        return None
+    return match.group(1).lower() == "yes"
+
+
+def _router_text(provider: str, model: str | None, question: str) -> str:
+    """One yes/no completion from the selected provider. No tools."""
+    if provider in {"openai", "openai-spec"}:
+        settings = observability.openai_client_settings(provider, model)
+        response = observability.call_openai(
+            [{"role": "user", "content": question}],
+            [],
+            INTENT_ROUTER_SYSTEM,
+            model=settings.get("model"),
+            api_key=settings.get("api_key"),
+            base_url=settings.get("base_url"),
+            name=settings.get("name", "openai"),
+        )
+        logged = observability._openai_output_message(response.choices[0])
+        return logged["content"] or logged.get("reasoning") or ""
+    if provider == "gemini":
+        from google.genai import types
+
+        response = observability.call_gemini(
+            [types.Content(role="user", parts=[types.Part.from_text(text=question)])],
+            [],
+            INTENT_ROUTER_SYSTEM,
+        )
+        return response.text or ""
+    response = observability.call_anthropic(
+        [{"role": "user", "content": question}],
+        [],
+        INTENT_ROUTER_SYSTEM,
+    )
+    return observability._anthropic_content_to_log(response.content)
+
+
+def _model_needs_splunk(
+    user_message: str,
+    history: list[dict] | None,
+    provider: str | None,
+    model: str | None,
+) -> bool | None:
+    selected = (provider or os.environ.get("LLM_PROVIDER", "anthropic")).strip().lower()
+    lines = [user_message]
+    for message in history or []:
+        if message.get("role") == "user" and message.get("content"):
+            lines.append(message["content"])
+    question = "\n".join(f"User: {text}" for text in lines[:4])
+    return _parse_yes_no(_router_text(selected, model, question))
+
+
+def _log_intent(mode: str, source: str, open_splunk: bool, **detail: str) -> None:
+    extra = " ".join(f"{key}={value}" for key, value in detail.items())
+    _intent_log.info(
+        "Intent source=%s mode=%s decision=%s%s",
+        source,
+        mode,
+        "open" if open_splunk else "skip",
+        f" {extra}" if extra else "",
+    )
+
+
+def _needs_splunk(
+    user_message: str,
+    history: list[dict] | None = None,
+    provider: str | None = None,
+    model: str | None = None,
+) -> bool:
+    """True when this question should open Splunk MCP."""
+    mode = intent_mode()
+    keyword_hit = _keyword_needs_splunk(user_message, history)
+    keywords = "hit" if keyword_hit else "miss"
+    if mode == "keywords" or (mode == "both" and keyword_hit):
+        _log_intent(mode, "keyword-list", keyword_hit, keywords=keywords)
+        return keyword_hit
+    try:
+        decision = _model_needs_splunk(user_message, history, provider, model)
+    except Exception as exc:
+        _log_intent(mode, "keyword-list", keyword_hit, keywords=keywords, reason="router-error", error=str(exc))
+        return keyword_hit
+    if decision is None:
+        _log_intent(mode, "keyword-list", keyword_hit, keywords=keywords, reason="router-unparsed")
+        return keyword_hit
+    _log_intent(mode, "model-router", decision, keywords=keywords)
+    return decision
 
 
 @log(span_type="agent", name="classifier", params={"agent_type": "classifier"})
@@ -286,6 +397,66 @@ def _gemini_contents(history: list[dict], user_message: str) -> list:
     return contents
 
 
+# granite-8b on the workshop LiteLLM host has a 4096-token window. Replaying
+# its reasoning, plus a full Splunk event page, overflows that on the next call.
+_OPENAI_SPEC_CONTEXT_TOKENS = 4096
+_OPENAI_SPEC_TOOL_RESULT_CHARS = 1800
+_CONTEXT_WARN_AT = int(_OPENAI_SPEC_CONTEXT_TOKENS * 0.75)
+
+
+def _estimated_tokens(*parts: object) -> int:
+    """Rough token count. One token is about four characters of JSON."""
+    return max(1, len(json.dumps(parts, default=str)) // 4)
+
+
+def _warn_if_near_context_window(
+    messages: list[dict],
+    tools: list[dict],
+    system_prompt: str,
+    client_settings: dict | None,
+) -> None:
+    if (client_settings or {}).get("name") != "openai-spec":
+        return
+    estimate = _estimated_tokens(system_prompt, messages, tools)
+    if estimate < _CONTEXT_WARN_AT:
+        return
+    _intent_log.warning(
+        "Context window: estimated %s tokens of %s before this model call",
+        estimate,
+        _OPENAI_SPEC_CONTEXT_TOKENS,
+    )
+
+
+def _openai_history_message(message) -> dict:
+    """Assistant turn to send back: tool calls and text, without reasoning."""
+    payload = {
+        "role": "assistant",
+        "tool_calls": [
+            {
+                "id": call.id,
+                "type": "function",
+                "function": {"name": call.function.name, "arguments": call.function.arguments or "{}"},
+            }
+            for call in message.tool_calls or []
+        ],
+    }
+    if message.content:
+        payload["content"] = message.content
+    return payload
+
+
+def _tool_result_for_model(result: str, client_settings: dict | None) -> str:
+    if (client_settings or {}).get("name") != "openai-spec" or len(result) <= _OPENAI_SPEC_TOOL_RESULT_CHARS:
+        return result
+    _intent_log.warning(
+        "Context window: truncated a tool result from %s to %s characters to stay inside the %s-token window",
+        len(result),
+        _OPENAI_SPEC_TOOL_RESULT_CHARS,
+        _OPENAI_SPEC_CONTEXT_TOKENS,
+    )
+    return result[:_OPENAI_SPEC_TOOL_RESULT_CHARS] + "\n...[truncated]"
+
+
 async def _openai_loop(
     user_message: str,
     mcp_tools: list[dict],
@@ -302,6 +473,7 @@ async def _openai_loop(
 
     for _ in range(MAX_TURNS):
         await observability.announce("model")
+        _warn_if_near_context_window(messages, tools, system_prompt, client_settings)
         response = observability.call_openai(messages, tools, system_prompt, **(client_settings or {}))
         message = response.choices[0].message
         if not message.tool_calls:
@@ -309,7 +481,7 @@ async def _openai_loop(
                 return _empty_answer_message(), 1
             return message.content, 0
 
-        messages.append(message.model_dump(exclude_unset=True))
+        messages.append(_openai_history_message(message))
         for tool_call in message.tool_calls:
             arguments = json.loads(tool_call.function.arguments or "{}")
             call_key = (tool_call.function.name, json.dumps(arguments, sort_keys=True))
@@ -319,7 +491,13 @@ async def _openai_loop(
 
             await observability.announce("tool", tool_call.function.name)
             result = await observability.call_splunk_tool(tool_call.function.name, arguments)
-            messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": result})
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": _tool_result_for_model(result, client_settings),
+                }
+            )
 
     return _turn_limit_message(), 1
 

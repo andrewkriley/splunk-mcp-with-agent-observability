@@ -1,6 +1,7 @@
 """Routing, history, and per-request MCP session behavior."""
 
 import asyncio
+import os
 import unittest
 
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -11,6 +12,9 @@ from app.agent import (
     SECURITY_KEYWORDS,
     _matches_any,
     _needs_splunk,
+    _openai_history_message,
+    _parse_yes_no,
+    _tool_result_for_model,
     _scoped_tools,
     run_agent_turn,
 )
@@ -66,6 +70,16 @@ class ToolScopeTests(unittest.TestCase):
 
 
 class IntentGateTests(unittest.TestCase):
+    def setUp(self):
+        self.previous_mode = os.environ.get("SPLUNK_INTENT_MODE")
+        os.environ["SPLUNK_INTENT_MODE"] = "keywords"
+
+    def tearDown(self):
+        if self.previous_mode is None:
+            os.environ.pop("SPLUNK_INTENT_MODE", None)
+        else:
+            os.environ["SPLUNK_INTENT_MODE"] = self.previous_mode
+
     def test_plain_question_skips_splunk(self):
         self.assertFalse(_needs_splunk("what model provider are we using"))
 
@@ -85,6 +99,79 @@ class IntentGateTests(unittest.TestCase):
     def test_added_trigger_words_open_splunk(self):
         for question in ("check infra", "review security", "any threats", "show events"):
             self.assertTrue(_needs_splunk(question), question)
+
+    def test_noteables_misses_the_static_list(self):
+        self.assertFalse(_needs_splunk("what noteables do we have"))
+
+    def test_yes_no_parser_reads_a_leading_answer(self):
+        self.assertTrue(_parse_yes_no("yes"))
+        self.assertFalse(_parse_yes_no("No, that is a greeting."))
+        self.assertIsNone(_parse_yes_no("not sure"))
+
+    def test_intent_log_names_the_list_or_the_router(self):
+        with self.assertLogs("app.llm", level="INFO") as captured:
+            _needs_splunk("show notables")
+        self.assertIn("source=keyword-list", captured.output[-1])
+        os.environ["SPLUNK_INTENT_MODE"] = "both"
+        with patch("app.agent._model_needs_splunk", return_value=True):
+            with self.assertLogs("app.llm", level="INFO") as captured:
+                _needs_splunk("what noteables do we have")
+        self.assertIn("source=model-router", captured.output[-1])
+
+    def test_context_window_logs_a_truncation_and_a_near_miss(self):
+        from app.agent import _warn_if_near_context_window
+
+        with self.assertLogs("app.llm", level="WARNING") as captured:
+            _tool_result_for_model("x" * 3000, {"name": "openai-spec"})
+        self.assertIn("truncated a tool result", captured.output[-1])
+        with self.assertLogs("app.llm", level="WARNING") as captured:
+            _warn_if_near_context_window(
+                [{"role": "user", "content": "y" * 16000}],
+                [],
+                "system",
+                {"name": "openai-spec"},
+            )
+        self.assertIn("estimated", captured.output[-1])
+        self.assertIn("of 4096", captured.output[-1])
+
+    def test_both_asks_the_model_only_when_the_list_misses(self):
+        os.environ["SPLUNK_INTENT_MODE"] = "both"
+        with patch("app.agent._model_needs_splunk", return_value=True) as router:
+            self.assertTrue(_needs_splunk("what noteables do we have", provider="openai-spec", model="granite-8b"))
+            self.assertTrue(_needs_splunk("show notables"))
+        router.assert_called_once()
+
+    def test_model_mode_can_decline_a_keyword_hit(self):
+        os.environ["SPLUNK_INTENT_MODE"] = "model"
+        with patch("app.agent._model_needs_splunk", return_value=False) as router:
+            self.assertFalse(_needs_splunk("show notables"))
+        router.assert_called_once()
+
+    def test_router_error_falls_back_to_the_keyword_list(self):
+        os.environ["SPLUNK_INTENT_MODE"] = "both"
+        with patch("app.agent._model_needs_splunk", side_effect=RuntimeError("router down")):
+            self.assertFalse(_needs_splunk("what noteables do we have"))
+        os.environ["SPLUNK_INTENT_MODE"] = "model"
+        with patch("app.agent._model_needs_splunk", side_effect=RuntimeError("router down")):
+            self.assertTrue(_needs_splunk("show notables"))
+
+    def test_openai_history_drops_reasoning(self):
+        message = MagicMock()
+        message.content = None
+        message.tool_calls = [MagicMock()]
+        message.tool_calls[0].id = "call-1"
+        message.tool_calls[0].function.name = "splunk_run_query"
+        message.tool_calls[0].function.arguments = '{"query":"index=oidemo_notable"}'
+        payload = _openai_history_message(message)
+        self.assertNotIn("reasoning_content", payload)
+        self.assertEqual(payload["tool_calls"][0]["function"]["name"], "splunk_run_query")
+
+    def test_openai_spec_tool_results_are_capped(self):
+        long_result = "x" * 3000
+        capped = _tool_result_for_model(long_result, {"name": "openai-spec"})
+        self.assertLess(len(capped), len(long_result))
+        self.assertTrue(capped.endswith("[truncated]"))
+        self.assertEqual(_tool_result_for_model(long_result, {"name": "openai"}), long_result)
 
     def test_chat_category_is_offered_no_tools(self):
         tools = [{"name": "splunk_run_query", "description": "", "input_schema": {}}]

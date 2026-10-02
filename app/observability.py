@@ -607,7 +607,6 @@ async def run_traced_turn(
     from app.agent import _needs_splunk, run_agent_turn
 
     history = prior_turns(conversation_id)
-    use_splunk = _needs_splunk(user_message, history)
     async with _o11y_lock:
         with activate_o11y():
             with splunk_ao_context(
@@ -621,6 +620,8 @@ async def run_traced_turn(
                 # list instead of the actual user question and final answer.
                 logger = splunk_ao_context.get_logger_instance()
                 logger.start_trace(input=user_message)
+                # Inside the trace so a model-router call is a span on this turn.
+                use_splunk = _needs_splunk(user_message, history, provider=provider, model=model)
 
                 if use_splunk:
                     async with mcp_client.splunk_mcp_session() as session:
