@@ -34,7 +34,7 @@
     .page {
       grid-template-columns: minmax(0, 1fr) 22rem;
     }
-    #right-rail {
+    #lab-guide {
       position: sticky;
       top: 1.5rem;
     }
@@ -247,113 +247,6 @@
     font-size: 0.74rem;
     color: var(--green-bright);
   }
-  #traces-panel {
-    margin: 0 0 0.85rem;
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    overflow: hidden;
-  }
-  #tab-traces {
-    width: 100%;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.5rem;
-    background: transparent;
-    color: var(--text);
-    border: 0;
-    padding: 0.85rem 1.1rem;
-    font-size: 0.95rem;
-    font-weight: 600;
-    cursor: pointer;
-    text-align: left;
-  }
-  #tab-traces:hover { color: var(--green-bright); }
-  #tab-traces .chevron {
-    color: var(--text-dim);
-    font-size: 0.78rem;
-    transition: transform 0.15s ease;
-  }
-  #tab-traces[aria-expanded="true"] .chevron { transform: rotate(90deg); }
-  #traces-body {
-    border-top: 1px solid var(--border);
-    padding: 0.75rem 1.1rem 1rem;
-  }
-  #traces-body p,
-  #traces-status {
-    margin: 0;
-    font-size: 0.78rem;
-    color: var(--text-dim);
-    line-height: 1.45;
-  }
-  #traces-body code {
-    font-size: 0.74rem;
-    color: var(--green-bright);
-  }
-  #traces-refresh {
-    margin-top: 0.55rem;
-    background: var(--bg);
-    color: var(--text);
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    padding: 0.3rem 0.75rem;
-    font-size: 0.78rem;
-    cursor: pointer;
-  }
-  #traces-refresh:hover {
-    border-color: var(--green-bright);
-    color: var(--green-bright);
-  }
-  #traces-list {
-    list-style: none;
-    margin: 0.65rem 0 0;
-    padding: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 0.35rem;
-    max-height: 16rem;
-    overflow-y: auto;
-  }
-  #traces-list button {
-    width: 100%;
-    text-align: left;
-    background: var(--bg);
-    color: var(--text);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 0.45rem 0.65rem;
-    font-size: 0.78rem;
-    cursor: pointer;
-  }
-  #traces-list button:hover,
-  #traces-list button.active {
-    border-color: var(--green-bright);
-  }
-  #traces-list .when {
-    display: block;
-    color: var(--text-dim);
-    font-size: 0.7rem;
-    margin-top: 0.15rem;
-  }
-  #traces-detail {
-    margin-top: 0.7rem;
-    font-size: 0.78rem;
-    color: var(--text-dim);
-    line-height: 1.4;
-  }
-  #traces-detail h3 {
-    margin: 0 0 0.35rem;
-    font-size: 0.72rem;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--text-dim);
-  }
-  #traces-detail ul {
-    margin: 0.2rem 0 0.55rem;
-    padding-left: 1.1rem;
-  }
   footer {
     text-align: center;
     font-size: 0.72rem;
@@ -427,24 +320,6 @@
 </section>
 </div>
 
-<div id="right-rail">
-<section id="traces-panel" hidden>
-  <button type="button" id="tab-traces" aria-expanded="false" aria-controls="traces-body">
-    My traces
-    <span class="chevron" aria-hidden="true">▸</span>
-  </button>
-  <div id="traces-body" hidden>
-    <p>
-      Sessions named <code id="traces-prefix">{you}-workshop-chat-</code> for this email.
-      The browser never sees the Galileo key. Facilitators set
-      <code>GALILEO_TRACES_PANEL=0</code> to disable this tab.
-    </p>
-    <button type="button" id="traces-refresh">Refresh</button>
-    <p id="traces-status" role="status"></p>
-    <ul id="traces-list"></ul>
-    <div id="traces-detail" hidden></div>
-  </div>
-</section>
 <aside id="lab-guide" aria-labelledby="lab-guide-title">
   <h2 id="lab-guide-title">Lab guide</h2>
   <p>Use this panel while you run the shared workshop demo. You do not need an API key. Do not paste tokens into chat.</p>
@@ -466,7 +341,6 @@
 
   <h3>3. Galileo traces and evaluations</h3>
   <ol>
-    <li>Open <strong>My traces</strong> on this page after a search. Sessions are filtered to <code>{you}-workshop-chat-</code>. Facilitators set <code>GALILEO_TRACES_PANEL=0</code> to hide the tab.</li>
     <li>Ask the facilitator for the shared Galileo login. Open <a href="https://console.multitenant.galileocloud.io">console.multitenant.galileocloud.io</a>.</li>
     <li>Open project <code>andreril-splunk-mcp-lab</code>, log stream <code>shared</code>.</li>
     <li>Find your session: <code>{you}-workshop-chat-…</code> — <code>{you}</code> is the part of your email before <code>@</code>.</li>
@@ -474,7 +348,6 @@
     <li>Open Evaluate / Metrics on the trace. Look for <code>groundedness</code> and <code>tool_selection_quality</code>. Scores can stay queued; the spans are enough for the lab.</li>
   </ol>
 </aside>
-</div>
 </div>
 
 <footer>Answers are grounded in live Splunk data via MCP, traced to Splunk Agent Observability (Galileo).</footer>
@@ -521,9 +394,7 @@ async function loadProviders() {
   try {
     const response = await fetch("/config");
     if (!response.ok) throw new Error(await errorDetail(response));
-    const { providers, default_provider, openai_spec_models, galileo_traces_panel } = await response.json();
-    const tracesPanel = document.getElementById("traces-panel");
-    tracesPanel.hidden = !galileo_traces_panel;
+    const { providers, default_provider, openai_spec_models } = await response.json();
     providerSelect.innerHTML = "";
     for (const provider of providers) {
       const option = document.createElement("option");
@@ -623,7 +494,6 @@ form.addEventListener("submit", async (event) => {
     const reply = await readChatStream(response, pending);
     pending.remove();
     addMessage("assistant", reply);
-    if (tracesOpen()) loadTraces();
   } catch (err) {
     pending.remove();
     addMessage("assistant", `Error: ${err.message}`);
@@ -633,110 +503,6 @@ form.addEventListener("submit", async (event) => {
     input.focus();
   }
 });
-
-const tracesPanel = document.getElementById("traces-panel");
-const tracesTab = document.getElementById("tab-traces");
-const tracesBody = document.getElementById("traces-body");
-const tracesList = document.getElementById("traces-list");
-const tracesStatus = document.getElementById("traces-status");
-const tracesDetail = document.getElementById("traces-detail");
-const tracesPrefix = document.getElementById("traces-prefix");
-const tracesRefresh = document.getElementById("traces-refresh");
-
-function tracesOpen() {
-  return !tracesPanel.hidden && !tracesBody.hidden;
-}
-
-async function loadTraces() {
-  if (tracesPanel.hidden) return;
-  tracesStatus.textContent = "Loading…";
-  tracesDetail.hidden = true;
-  tracesDetail.replaceChildren();
-  tracesList.replaceChildren();
-  try {
-    const response = await fetch("/galileo/sessions");
-    if (!response.ok) throw new Error(await errorDetail(response));
-    const body = await response.json();
-    if (body.prefix) tracesPrefix.textContent = body.prefix;
-    const sessions = body.sessions || [];
-    if (!sessions.length) {
-      tracesStatus.textContent = "No sessions yet. Run a search, then Refresh.";
-      return;
-    }
-    tracesStatus.textContent = sessions.length === 1
-      ? "1 session"
-      : `${sessions.length} sessions`;
-    for (const session of sessions) {
-      const item = document.createElement("li");
-      const button = document.createElement("button");
-      button.type = "button";
-      button.dataset.sessionId = session.id;
-      button.appendChild(document.createTextNode(session.name || session.id));
-      if (session.created_at) {
-        const when = document.createElement("span");
-        when.className = "when";
-        when.textContent = session.created_at.replace("T", " ").replace("Z", " UTC");
-        button.appendChild(when);
-      }
-      button.addEventListener("click", () => loadTraceDetail(session.id, button));
-      item.appendChild(button);
-      tracesList.appendChild(item);
-    }
-  } catch (err) {
-    tracesStatus.textContent = `Could not load traces: ${err.message}`;
-  }
-}
-
-async function loadTraceDetail(sessionId, button) {
-  tracesList.querySelectorAll("button").forEach((el) => el.classList.remove("active"));
-  if (button) button.classList.add("active");
-  tracesDetail.hidden = false;
-  tracesDetail.textContent = "Loading spans…";
-  try {
-    const response = await fetch("/galileo/sessions/" + encodeURIComponent(sessionId));
-    if (!response.ok) throw new Error(await errorDetail(response));
-    const session = await response.json();
-    tracesDetail.replaceChildren();
-    const heading = document.createElement("h3");
-    heading.textContent = session.name || session.id;
-    tracesDetail.appendChild(heading);
-    const traces = session.traces || [];
-    if (!traces.length) {
-      const empty = document.createElement("p");
-      empty.textContent = "No spans in this session yet.";
-      tracesDetail.appendChild(empty);
-      return;
-    }
-    for (const trace of traces) {
-      const title = document.createElement("p");
-      title.textContent = trace.name || "trace";
-      tracesDetail.appendChild(title);
-      const spans = document.createElement("ul");
-      for (const span of trace.spans || []) {
-        const item = document.createElement("li");
-        const kind = span.type ? `${span.type}: ` : "";
-        item.textContent = kind + (span.name || "(unnamed)");
-        spans.appendChild(item);
-      }
-      if (!spans.childElementCount) {
-        const item = document.createElement("li");
-        item.textContent = "no spans";
-        spans.appendChild(item);
-      }
-      tracesDetail.appendChild(spans);
-    }
-  } catch (err) {
-    tracesDetail.textContent = `Could not load session: ${err.message}`;
-  }
-}
-
-tracesTab.addEventListener("click", () => {
-  const open = tracesBody.hidden;
-  tracesBody.hidden = !open;
-  tracesTab.setAttribute("aria-expanded", open ? "true" : "false");
-  if (open) loadTraces();
-});
-tracesRefresh.addEventListener("click", () => loadTraces());
 </script>
 </body>
 </html>
