@@ -108,9 +108,19 @@ def apply_galileo_console_url() -> str:
 
 
 def _galileo_session_id(conversation_id: str, user: str = "") -> str:
+    """One Galileo session per browser ``conversation_id``.
+
+    Call this **inside** ``galileo_context`` so ``start_session`` hits the
+    workshop project/log stream. Evaluating it as a ``galileo_context(...)``
+    argument creates the session on the default logger, and the first trace's
+    input/output then stay blank until a later flush. Follow-up turns reuse
+    the cached id; a new ``conversation_id`` (page refresh) starts another
+    session.
+    """
     if conversation_id not in _galileo_sessions:
         _galileo_sessions[conversation_id] = start_session(
-            name=galileo_session_name(conversation_id, user)
+            name=galileo_session_name(conversation_id, user),
+            external_id=conversation_id,
         )
     return _galileo_sessions[conversation_id]
 
@@ -498,8 +508,11 @@ async def run_traced_turn(
     with galileo_context(
         project=os.environ.get("GALILEO_PROJECT", "splunk-mcp-with-agent-observability"),
         log_stream=os.environ.get("GALILEO_LOG_STREAM", "default"),
-        session_id=_galileo_session_id(conversation_id, user),
     ):
+        # Bind the session after the context is entered so it is created on this
+        # project/log stream. Do not pass session_id= into galileo_context():
+        # Python evaluates that argument first, on the default logger.
+        galileo_context.set_session(_galileo_session_id(conversation_id, user))
         # Without an explicit start_trace/conclude, Splunk Agent Observability (Galileo) lazily creates the
         # trace from whichever child span happens to log first — so the trace's
         # own input/output end up being an arbitrary tool call or LLM message
@@ -529,7 +542,7 @@ async def run_traced_turn(
                 use_splunk=False,
             )
 
-        logger.conclude(output=result)
+        logger.conclude(output=result, conclude_all=True)
         galileo_context.flush()
         remember_turn(conversation_id, user_message, result)
         return result

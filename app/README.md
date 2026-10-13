@@ -148,14 +148,16 @@ it connects directly.
   matters — without it, Splunk Agent Observability (Galileo)'s `tool_selection_quality` metric can't run
   and reports "not applicable"). Every Splunk MCP tool call still uses
   `@log(span_type="tool")`, which doesn't have this problem since its
-  input/output are already simple strings. `run_traced_turn` maps each
-  `conversation_id` to a Splunk Agent Observability (Galileo) session (created once via `start_session`,
-  cached), explicitly calls `start_trace(input=user_message)` /
-  `conclude(output=result)` so the trace shows the real question and answer
-  rather than an arbitrary child span's input/output, and wraps it all in
-  one `galileo_context(session_id=...)` so every LLM/tool span from that
-  turn lands in one trace, and every turn in the conversation lands in one
-  session.
+  input/output are already simple strings.   `run_traced_turn` maps each
+  `conversation_id` to a Splunk Agent Observability (Galileo) session (created once via
+  `start_session(external_id=conversation_id)` **inside** `galileo_context`,
+  then cached). Follow-up turns `set_session` that id so they stay in one
+  session; a page refresh mints a new `conversation_id` and a new session.
+  Each turn calls `start_trace(input=user_message)` /
+  `conclude(output=result, conclude_all=True)` / `flush()` so the first
+  question's input/output is visible without closing the session. Do not
+  pass `session_id=` into `galileo_context(...)` — that starts the session
+  on the default logger before the workshop project is bound.
 
 If you're building your own version instead of using this one, this is the
 same build order: MCP client → LLM adapter/agent loop → Splunk Agent Observability (Galileo) tracing →
