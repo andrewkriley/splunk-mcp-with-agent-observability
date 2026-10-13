@@ -127,7 +127,7 @@
     border-color: var(--green-bright);
     box-shadow: 0 0 0 2px rgba(141, 198, 63, 0.25);
   }
-  button {
+  form button {
     background: var(--green);
     color: #0c0f14;
     border: none;
@@ -137,13 +137,63 @@
     font-weight: 600;
     cursor: pointer;
   }
-  button:hover { background: var(--green-bright); }
-  button:disabled,
+  form button:hover { background: var(--green-bright); }
+  form button:disabled,
   input:disabled {
     opacity: 0.55;
     cursor: default;
   }
-  button:disabled:hover { background: var(--green); }
+  form button:disabled:hover { background: var(--green); }
+  #prompt-guide {
+    margin-top: 1.25rem;
+    padding: 1rem 1.1rem 1.15rem;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+  }
+  #prompt-guide h2 {
+    margin: 0;
+    font-size: 0.95rem;
+    font-weight: 600;
+  }
+  #prompt-guide h3 {
+    margin: 0.85rem 0 0.4rem;
+    font-size: 0.72rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-dim);
+  }
+  #prompt-guide p {
+    margin: 0.4rem 0 0;
+    font-size: 0.78rem;
+    color: var(--text-dim);
+    line-height: 1.45;
+  }
+  #prompt-guide code {
+    font-size: 0.74rem;
+    color: var(--green-bright);
+  }
+  .prompt-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+  }
+  button.prompt {
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 0.4rem 0.75rem;
+    font-size: 0.78rem;
+    font-weight: 500;
+    cursor: pointer;
+    text-align: left;
+  }
+  button.prompt:hover {
+    border-color: var(--green-bright);
+    color: var(--green-bright);
+  }
   footer {
     text-align: center;
     font-size: 0.72rem;
@@ -183,6 +233,37 @@
   <input id="message" type="text" maxlength="4000" placeholder="Search> any high severity notables in the last 30 days?" autocomplete="off" required>
   <button id="submit" type="submit" disabled>Search</button>
 </form>
+
+<section id="prompt-guide" aria-labelledby="prompt-guide-title">
+  <h2 id="prompt-guide-title">Try these searches</h2>
+  <p>
+    Ask in plain English. Answers are grounded in this workshop's Splunk indexes
+    (<code>oidemo_notable</code> security notables, <code>oidemo</code> datacenter
+    telemetry, <code>main</code> Cisco IOS / Nagios). A misspelling such as
+    <em>noteables</em> still searches — the model decides, not a keyword list.
+    Click a prompt to drop it in the box, then Search.
+  </p>
+  <h3>Security</h3>
+  <div class="prompt-list">
+    <button type="button" class="prompt" data-prompt="any high severity notables in the last 30 days">any high severity notables in the last 30 days</button>
+    <button type="button" class="prompt" data-prompt="what noteables do we have">what noteables do we have</button>
+    <button type="button" class="prompt" data-prompt="show brute force access attempts">show brute force access attempts</button>
+    <button type="button" class="prompt" data-prompt="are there SQL injection attacks in the notables">are there SQL injection attacks in the notables</button>
+    <button type="button" class="prompt" data-prompt="any malware outbreaks or recurring infections">any malware outbreaks or recurring infections</button>
+  </div>
+  <h3>Datacenter</h3>
+  <div class="prompt-list">
+    <button type="button" class="prompt" data-prompt="what's the PDU power draw in the datacenter">what's the PDU power draw in the datacenter</button>
+    <button type="button" class="prompt" data-prompt="show CRAC cooling temperatures">show CRAC cooling temperatures</button>
+    <button type="button" class="prompt" data-prompt="any Cisco ASA or firewall events">any Cisco ASA or firewall events</button>
+  </div>
+  <h3>Mix</h3>
+  <div class="prompt-list">
+    <button type="button" class="prompt" data-prompt="Compare security notables with PDU power draw">Compare security notables with PDU power draw</button>
+    <button type="button" class="prompt" data-prompt="what Splunk indexes can I search">what Splunk indexes can I search</button>
+  </div>
+</section>
+
 <footer>Answers are grounded in live Splunk data via MCP, traced to Splunk Agent Observability (Galileo).</footer>
 
 <script>
@@ -293,6 +374,13 @@ function addMessage(role, text) {
   log.scrollTop = log.scrollHeight;
   return wrapper;
 }
+
+document.getElementById("prompt-guide").addEventListener("click", (event) => {
+  const button = event.target.closest("button.prompt");
+  if (!button || !button.dataset.prompt) return;
+  input.value = button.dataset.prompt;
+  input.focus();
+});
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
