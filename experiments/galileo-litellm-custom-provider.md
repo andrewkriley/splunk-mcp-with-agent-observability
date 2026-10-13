@@ -1,13 +1,29 @@
 # Experiment: pointing Splunk Agent Observability (Galileo)'s custom LLM provider at LiteLLM
 
-**Status: untested, exploratory.** Not part of the core workshop — this is
-about configuring the LLM Splunk Agent Observability (Galileo) itself uses to power its scoring/judge
-metrics (e.g. `groundedness`, `tool_selection_quality`), not anything the
-workshop's chat app calls. See the `## Metrics stuck on "queued"` entry in
-`build.md`'s troubleshooting for why this came up: those metrics never
-completed even with a healthy account-level OpenAI integration, and using a
-LiteLLM proxy as a custom provider was one avenue considered for more control
-over (or visibility into) what backs Splunk Agent Observability (Galileo)'s scoring calls.
+**Status:** the Cisco Live APJC 2026 shared instance uses this pattern live
+(see below). The generic setup notes after that section stay exploratory.
+
+This is about configuring the LLM Splunk Agent Observability (Galileo) itself
+uses to power its scoring/judge metrics (e.g. `groundedness`,
+`tool_selection_quality`), plus whether that judge shares a LiteLLM virtual
+key with the workshop chat app. See the `## Metrics stuck on "queued"` entry
+in `build.md`'s troubleshooting for why this came up.
+
+## Cisco Live APJC 2026: one LiteLLM key, two callers
+
+On the shared instance (`https://mcp-lab.apps.andrewriley.info`) the chat
+app and Galileo's judge can use the **same** public edge LiteLLM
+(`https://litellm.apps.andrewriley.info/v1`, model `bedrock-claude`).
+
+| Caller | Infisical name | How it is used |
+| --- | --- | --- |
+| Buttercup chat app | `/apps/splunk-mcp-lab` `MCP_LAB_LITELLM_KEY` | Compose `OPENAI_SPEC_API_KEY` → in-compose `http://litellm:4000/v1` |
+| Galileo custom provider (judge) | `/apps/aws-edge-litellm` `LTRXAR_2194` | SaaS `Authorization: Bearer <virtual key>` → public `https://litellm.apps.andrewriley.info/v1` (Galileo appends `/chat/completions`). Slug `edge-litellm`, not the hostname. |
+
+`LTRXAR_2194` and `MCP_LAB_LITELLM_KEY` may hold the **same** virtual key
+so both callers share one model provider. They may also hold **separate**
+virtual keys (different spend, rotation, or allowlists). Dual use is a
+convenience, not a requirement. Names only. Never print values.
 
 ## Background
 
