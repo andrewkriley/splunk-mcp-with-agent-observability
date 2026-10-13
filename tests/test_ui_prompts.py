@@ -92,6 +92,8 @@ class LabGuideTests(unittest.TestCase):
 
 class TracesPanelTests(unittest.TestCase):
     def test_traces_tab_is_present_and_collapsed(self):
+        self.assertLess(HTML.index('id="right-rail"'), HTML.index('id="traces-panel"'))
+        self.assertLess(HTML.index('id="traces-panel"'), HTML.index('id="lab-guide"'))
         self.assertIn('id="traces-panel"', HTML)
         self.assertIn('id="tab-traces"', HTML)
         self.assertIn("My traces", HTML)

@@ -34,8 +34,7 @@
     .page {
       grid-template-columns: minmax(0, 1fr) 22rem;
     }
-    #right-rail,
-    #lab-guide {
+    #right-rail {
       position: sticky;
       top: 1.5rem;
     }
@@ -249,7 +248,7 @@
     color: var(--green-bright);
   }
   #traces-panel {
-    margin-top: 0.85rem;
+    margin: 0 0 0.85rem;
     background: var(--panel);
     border: 1px solid var(--border);
     border-radius: 10px;
@@ -429,6 +428,23 @@
 </div>
 
 <div id="right-rail">
+<section id="traces-panel" hidden>
+  <button type="button" id="tab-traces" aria-expanded="false" aria-controls="traces-body">
+    My traces
+    <span class="chevron" aria-hidden="true">▸</span>
+  </button>
+  <div id="traces-body" hidden>
+    <p>
+      Sessions named <code id="traces-prefix">{you}-workshop-chat-</code> for this email.
+      The browser never sees the Galileo key. Facilitators set
+      <code>GALILEO_TRACES_PANEL=0</code> to disable this tab.
+    </p>
+    <button type="button" id="traces-refresh">Refresh</button>
+    <p id="traces-status" role="status"></p>
+    <ul id="traces-list"></ul>
+    <div id="traces-detail" hidden></div>
+  </div>
+</section>
 <aside id="lab-guide" aria-labelledby="lab-guide-title">
   <h2 id="lab-guide-title">Lab guide</h2>
   <p>Use this panel while you run the shared workshop demo. You do not need an API key. Do not paste tokens into chat.</p>
@@ -458,24 +474,6 @@
     <li>Open Evaluate / Metrics on the trace. Look for <code>groundedness</code> and <code>tool_selection_quality</code>. Scores can stay queued; the spans are enough for the lab.</li>
   </ol>
 </aside>
-
-<section id="traces-panel" hidden>
-  <button type="button" id="tab-traces" aria-expanded="false" aria-controls="traces-body">
-    My traces
-    <span class="chevron" aria-hidden="true">▸</span>
-  </button>
-  <div id="traces-body" hidden>
-    <p>
-      Sessions named <code id="traces-prefix">{you}-workshop-chat-</code> for this email.
-      The browser never sees the Galileo key. Facilitators set
-      <code>GALILEO_TRACES_PANEL=0</code> to disable this tab.
-    </p>
-    <button type="button" id="traces-refresh">Refresh</button>
-    <p id="traces-status" role="status"></p>
-    <ul id="traces-list"></ul>
-    <div id="traces-detail" hidden></div>
-  </div>
-</section>
 </div>
 </div>
 

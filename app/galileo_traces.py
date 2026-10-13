@@ -10,6 +10,7 @@ import os
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from collections.abc import Callable, Mapping
 from typing import Any
 
@@ -17,6 +18,8 @@ from app.workshop_user import workshop_user_from_value
 
 HttpJson = Callable[..., tuple[int, Any]]
 _FALSE = frozenset({"0", "false", "no", "off"})
+_PROJECT_IDS: dict[str, str] = {}
+_STREAM_IDS: dict[tuple[str, str], str] = {}
 
 
 def traces_panel_enabled() -> bool:
@@ -95,11 +98,100 @@ def http_json(
         return status, None
 
 
-def _project_path() -> str:
-    ident = (
-        os.environ.get("GALILEO_PROJECT_ID") or os.environ.get("GALILEO_PROJECT") or ""
-    ).strip()
-    return urllib.parse.quote(ident, safe="")
+def _looks_like_uuid(value: str) -> bool:
+    try:
+        uuid.UUID(value)
+    except (ValueError, AttributeError, TypeError):
+        return False
+    return True
+
+
+def _project_rows(body: object) -> list[Mapping[str, Any]]:
+    if isinstance(body, Mapping):
+        raw = body.get("projects") or body.get("records") or body.get("data")
+    elif isinstance(body, list):
+        raw = body
+    else:
+        raw = None
+    if not isinstance(raw, list):
+        return []
+    return [row for row in raw if isinstance(row, Mapping)]
+
+
+def resolve_project_id(http: HttpJson | None = None) -> str:
+    explicit = (os.environ.get("GALILEO_PROJECT_ID") or "").strip()
+    if _looks_like_uuid(explicit):
+        return explicit
+    name = (os.environ.get("GALILEO_PROJECT") or "").strip()
+    if _looks_like_uuid(name):
+        return name
+    if not name:
+        return ""
+    cached = _PROJECT_IDS.get(name)
+    if cached:
+        return cached
+    post = http or http_json
+    token: object = 0
+    for _ in range(10):
+        status, payload = post(
+            "POST",
+            f"{api_base_url()}/v2/projects/paginated",
+            headers=_headers(),
+            body={"limit": 50, "starting_token": token, "filters": []},
+        )
+        if status not in (200, 201):
+            break
+        for row in _project_rows(payload):
+            if str(row.get("name") or "") != name:
+                continue
+            pid = str(row.get("id") or "")
+            if _looks_like_uuid(pid):
+                _PROJECT_IDS[name] = pid
+                return pid
+        nxt = payload.get("next_starting_token") if isinstance(payload, Mapping) else None
+        if nxt is None or nxt == token:
+            break
+        token = nxt
+    return ""
+
+
+def resolve_log_stream_id(project_id: str, http: HttpJson | None = None) -> str:
+    explicit = (os.environ.get("GALILEO_LOG_STREAM_ID") or "").strip()
+    if _looks_like_uuid(explicit):
+        return explicit
+    name = (os.environ.get("GALILEO_LOG_STREAM") or "").strip()
+    if not project_id or not name:
+        return ""
+    cache_key = (project_id, name)
+    cached = _STREAM_IDS.get(cache_key)
+    if cached:
+        return cached
+    post = http or http_json
+    encoded = urllib.parse.quote(project_id, safe="")
+    status, payload = post(
+        "GET",
+        f"{api_base_url()}/v2/projects/{encoded}/log_streams",
+        headers=_headers(),
+        body=None,
+    )
+    if status not in (200, 201):
+        return ""
+    if isinstance(payload, Mapping):
+        raw = payload.get("log_streams") or payload.get("records") or payload.get("data")
+    else:
+        raw = payload
+    if not isinstance(raw, list):
+        return ""
+    for row in raw:
+        if not isinstance(row, Mapping):
+            continue
+        if str(row.get("name") or "") != name:
+            continue
+        sid = str(row.get("id") or "")
+        if sid:
+            _STREAM_IDS[cache_key] = sid
+            return sid
+    return ""
 
 
 def _records(body: object) -> list[dict[str, Any]]:
@@ -162,10 +254,11 @@ def fetch_sessions(user: str, http: HttpJson | None = None) -> list[dict[str, An
     if not prefix:
         return []
     post = http or http_json
-    project = _project_path()
+    project = resolve_project_id(http=post)
     if not project:
         return []
-    url = f"{api_base_url()}/v2/projects/{project}/sessions/search"
+    encoded = urllib.parse.quote(project, safe="")
+    url = f"{api_base_url()}/v2/projects/{encoded}/sessions/search"
     body: dict[str, Any] = {
         "filters": [
             {
@@ -183,12 +276,12 @@ def fetch_sessions(user: str, http: HttpJson | None = None) -> list[dict[str, An
             "sort_type": "column",
         },
     }
-    stream = os.environ.get("GALILEO_LOG_STREAM_ID", "").strip()
+    stream = resolve_log_stream_id(project, http=post)
     if stream:
         body["log_stream_id"] = stream
     status, payload = post("POST", url, headers=_headers(), body=body)
     if status not in (200, 201):
-        raise RuntimeError("Galileo session search failed")
+        raise RuntimeError(f"Galileo session search failed ({status})")
     return filter_sessions(_records(payload), user)
 
 
@@ -197,11 +290,12 @@ def fetch_session(session_id: str, http: HttpJson | None = None) -> dict[str, An
     if not sid or "/" in sid or ".." in sid:
         return None
     post = http or http_json
-    project = _project_path()
+    project = resolve_project_id(http=post)
     if not project:
         return None
     encoded = urllib.parse.quote(sid, safe="")
-    url = f"{api_base_url()}/v2/projects/{project}/sessions/{encoded}"
+    project_path = urllib.parse.quote(project, safe="")
+    url = f"{api_base_url()}/v2/projects/{project_path}/sessions/{encoded}"
     status, payload = post("GET", url, headers=_headers(), body=None)
     if status not in (200, 201) or not isinstance(payload, Mapping):
         return None

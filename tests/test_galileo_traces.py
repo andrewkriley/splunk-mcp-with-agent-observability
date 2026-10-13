@@ -9,7 +9,9 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from app.galileo_traces import (
+    fetch_sessions,
     filter_sessions,
+    resolve_project_id,
     session_belongs,
     session_prefix,
     traces_panel_enabled,
@@ -120,6 +122,72 @@ class TracesApiTests(unittest.TestCase):
                 headers={"X-Mcp-Lab-User": "ada"},
             )
         self.assertEqual(response.status_code, 404)
+
+
+class ProjectLookupTests(unittest.TestCase):
+    def setUp(self):
+        import app.galileo_traces as traces
+
+        traces._PROJECT_IDS.clear()
+        traces._STREAM_IDS.clear()
+
+    def test_uuid_env_is_used_as_is(self):
+        pid = "123e4567-e89b-12d3-a456-426614174000"
+        with patch.dict(os.environ, {"GALILEO_PROJECT_ID": pid, "GALILEO_PROJECT": "named"}, clear=False):
+            self.assertEqual(resolve_project_id(http=lambda *a, **k: (500, None)), pid)
+
+    def test_project_name_is_looked_up_via_paginated_list(self):
+        pid = "123e4567-e89b-12d3-a456-426614174000"
+        calls: list[str] = []
+
+        def http(method, url, **_kwargs):
+            calls.append(f"{method} {url}")
+            return 200, {"projects": [{"id": pid, "name": "andreril-splunk-mcp-lab"}]}
+
+        env = {
+            "GALILEO_PROJECT": "andreril-splunk-mcp-lab",
+            "GALILEO_API_URL": "https://api.example.test",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            os.environ.pop("GALILEO_PROJECT_ID", None)
+            self.assertEqual(resolve_project_id(http=http), pid)
+        self.assertTrue(any("/v2/projects/paginated" in url for url in calls))
+        self.assertTrue(all("andreril-splunk-mcp-lab/" not in url for url in calls))
+
+    def test_session_search_uses_project_uuid_not_the_name(self):
+        pid = "123e4567-e89b-12d3-a456-426614174000"
+        calls: list[str] = []
+
+        def http(method, url, **kwargs):
+            calls.append(f"{method} {url}")
+            if url.endswith("/projects/paginated"):
+                return 200, {"projects": [{"id": pid, "name": "andreril-splunk-mcp-lab"}]}
+            if url.endswith("/log_streams"):
+                return 200, [{"id": "stream-1", "name": "shared"}]
+            if url.endswith("/sessions/search"):
+                self.assertIn(pid, url)
+                self.assertNotIn("andreril-splunk-mcp-lab", url)
+                return 200, {
+                    "records": [
+                        {"id": "s1", "name": "ada-workshop-chat-1", "created_at": "9"},
+                        {"id": "s2", "name": "bob-workshop-chat-1", "created_at": "8"},
+                    ]
+                }
+            return 404, None
+
+        env = {
+            "GALILEO_PROJECT": "andreril-splunk-mcp-lab",
+            "GALILEO_LOG_STREAM": "shared",
+            "GALILEO_API_URL": "https://api.example.test",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            os.environ.pop("GALILEO_PROJECT_ID", None)
+            os.environ.pop("GALILEO_LOG_STREAM_ID", None)
+            rows = fetch_sessions("ada", http=http)
+        self.assertEqual([row["id"] for row in rows], ["s1"])
+        self.assertTrue(any(url.endswith("/sessions/search") for url in calls))
+        self.assertTrue(any(pid in url for url in calls))
+        self.assertFalse(any("andreril-splunk-mcp-lab/" in url for url in calls))
 
 
 if __name__ == "__main__":
