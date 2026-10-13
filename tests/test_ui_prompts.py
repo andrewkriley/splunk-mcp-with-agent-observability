@@ -79,7 +79,10 @@ class LabGuideTests(unittest.TestCase):
         self.assertIn("Search", guide)
         self.assertIn("Try these searches", guide)
         self.assertIn("noteables", guide)
-        self.assertIn("Ask the facilitator for the shared Galileo login details", guide)
+        self.assertIn(
+            "Ask the facilitator for the shared Galileo / Splunk Agent Observability login details",
+            guide,
+        )
         self.assertNotIn("console.multitenant.galileocloud.io", guide)
         self.assertNotIn("galileocloud.io", guide)
         self.assertIn("andreril-splunk-mcp-lab", guide)
