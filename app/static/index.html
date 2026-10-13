@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Buttercup Games — Splunk MCP Chat</title>
 <style>
   :root {
@@ -19,9 +20,24 @@
     font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
     background: var(--bg);
     color: var(--text);
-    max-width: 760px;
+    max-width: 1180px;
     margin: 0 auto;
     padding: 1.5rem 1rem 2rem;
+  }
+  .page {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 1.25rem;
+    align-items: start;
+  }
+  @media (min-width: 980px) {
+    .page {
+      grid-template-columns: minmax(0, 1fr) 22rem;
+    }
+    #lab-guide {
+      position: sticky;
+      top: 1.5rem;
+    }
   }
   header {
     display: flex;
@@ -194,6 +210,43 @@
     border-color: var(--green-bright);
     color: var(--green-bright);
   }
+  #lab-guide {
+    padding: 1rem 1.1rem 1.15rem;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+  }
+  #lab-guide h2 {
+    margin: 0;
+    font-size: 0.95rem;
+    font-weight: 600;
+  }
+  #lab-guide h3 {
+    margin: 0.95rem 0 0.4rem;
+    font-size: 0.72rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-dim);
+  }
+  #lab-guide p,
+  #lab-guide li {
+    margin: 0.35rem 0 0;
+    font-size: 0.78rem;
+    color: var(--text-dim);
+    line-height: 1.45;
+  }
+  #lab-guide ol {
+    margin: 0.35rem 0 0;
+    padding-left: 1.15rem;
+  }
+  #lab-guide a {
+    color: var(--green-bright);
+  }
+  #lab-guide code {
+    font-size: 0.74rem;
+    color: var(--green-bright);
+  }
   footer {
     text-align: center;
     font-size: 0.72rem;
@@ -204,6 +257,8 @@
 </head>
 <body>
 
+<div class="page">
+<div id="chat-column">
 <header>
   <svg width="34" height="34" viewBox="0 0 64 64" aria-hidden="true">
     <circle cx="32" cy="32" r="30" fill="#0c0f14" stroke="#2a323d"/>
@@ -263,6 +318,37 @@
     <button type="button" class="prompt" data-prompt="what Splunk indexes can I search">what Splunk indexes can I search</button>
   </div>
 </section>
+</div>
+
+<aside id="lab-guide" aria-labelledby="lab-guide-title">
+  <h2 id="lab-guide-title">Lab guide</h2>
+  <p>Use this panel while you run the shared workshop demo. You do not need an API key. Do not paste tokens into chat.</p>
+
+  <h3>1. Access</h3>
+  <ol>
+    <li>Open <a href="https://mcp-lab.apps.andrewriley.info">mcp-lab.apps.andrewriley.info</a>.</li>
+    <li>Enter the email the facilitator asked you to use.</li>
+    <li>Click <strong>Open lab</strong>. This Buttercup page is the chat. The same email reclaims the same session.</li>
+  </ol>
+
+  <h3>2. Run a search</h3>
+  <ol>
+    <li>Click a chip under <strong>Try these searches</strong>, or type in the box.</li>
+    <li>Click <strong>Search</strong>. The pending line says <em>Noodling...</em>, then <em>Searching Splunk...</em> when MCP runs.</li>
+    <li>A misspelling such as <em>noteables</em> still searches — the model decides, not a keyword list.</li>
+    <li>Stay on this page for follow-ups. Reload starts a new Galileo session.</li>
+  </ol>
+
+  <h3>3. Galileo traces and evaluations</h3>
+  <ol>
+    <li>Ask the facilitator for the shared Galileo login. Open <a href="https://console.multitenant.galileocloud.io">console.multitenant.galileocloud.io</a>.</li>
+    <li>Open project <code>andreril-splunk-mcp-lab</code>, log stream <code>shared</code>.</li>
+    <li>Find your session: <code>{you}-workshop-chat-…</code> — <code>{you}</code> is the part of your email before <code>@</code>.</li>
+    <li>Open the latest trace. Expand <code>supervisor</code> → classifier / worker → <code>llm</code> and <code>tool</code> spans. Tool spans are the Splunk MCP calls.</li>
+    <li>Open Evaluate / Metrics on the trace. Look for <code>groundedness</code> and <code>tool_selection_quality</code>. Scores can stay queued; the spans are enough for the lab.</li>
+  </ol>
+</aside>
+</div>
 
 <footer>Answers are grounded in live Splunk data via MCP, traced to Splunk Agent Observability (Galileo).</footer>
 

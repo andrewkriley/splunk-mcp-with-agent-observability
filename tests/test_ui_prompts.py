@@ -50,5 +50,45 @@ class PromptGuideTests(unittest.TestCase):
         self.assertNotIn("form.requestSubmit()", HTML)
 
 
+class LabGuideTests(unittest.TestCase):
+    def test_lab_guide_sits_to_the_right_of_chat(self):
+        chat = HTML.index('id="chat-column"')
+        form = HTML.index('id="chat-form"')
+        prompts = HTML.index('id="prompt-guide"')
+        guide = HTML.index('id="lab-guide"')
+        footer = HTML.rindex("<footer")
+        self.assertLess(chat, form)
+        self.assertLess(form, prompts)
+        self.assertLess(prompts, guide)
+        self.assertLess(guide, footer)
+        self.assertIn("<aside", HTML[guide - 80 : guide + 20])
+        self.assertIn("grid-template-columns: minmax(0, 1fr) 22rem", HTML)
+        self.assertIn('name="viewport"', HTML)
+
+    def test_lab_guide_covers_access_search_and_galileo(self):
+        start = HTML.index('id="lab-guide"')
+        end = HTML.rindex("<footer")
+        guide = HTML[start:end]
+        self.assertIn("Lab guide", guide)
+        self.assertIn("1. Access", guide)
+        self.assertIn("2. Run a search", guide)
+        self.assertIn("3. Galileo traces and evaluations", guide)
+        self.assertIn("mcp-lab.apps.andrewriley.info", guide)
+        self.assertIn("Open lab", guide)
+        self.assertIn("email", guide.lower())
+        self.assertIn("Search", guide)
+        self.assertIn("Try these searches", guide)
+        self.assertIn("noteables", guide)
+        self.assertIn("console.multitenant.galileocloud.io", guide)
+        self.assertIn("andreril-splunk-mcp-lab", guide)
+        self.assertIn("shared", guide)
+        self.assertIn("workshop-chat-", guide)
+        self.assertIn("supervisor", guide)
+        self.assertIn("groundedness", guide)
+        self.assertIn("tool_selection_quality", guide)
+        self.assertNotIn("GALILEO_API_KEY", guide)
+        self.assertNotIn("SPLUNK_MCP_TOKEN", guide)
+
+
 if __name__ == "__main__":
     unittest.main()
