@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field, field_validator
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 from app.observability import bind_activity, openai_spec_config, reset_activity, run_traced_turn  # noqa: E402 — import after load_dotenv sets env vars
+from app.workshop_user import workshop_user_from_value  # noqa: E402
 
 app = FastAPI(title="splunk-mcp-with-agent-observability")
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
@@ -114,8 +115,12 @@ async def config():
     )
 
 
+def _workshop_user(raw: Request) -> str:
+    return workshop_user_from_value(raw.headers.get("x-mcp-lab-user"))
+
+
 @app.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
+async def chat(request: ChatRequest, raw: Request):
     if request.provider and request.provider not in _configured_providers():
         raise HTTPException(400, f"'{request.provider}' has no API key configured in .env")
 
@@ -129,7 +134,11 @@ async def chat(request: ChatRequest):
     try:
         reply = await asyncio.wait_for(
             run_traced_turn(
-                request.message, request.conversation_id, provider=request.provider, model=model
+                request.message,
+                request.conversation_id,
+                provider=request.provider,
+                model=model,
+                user=_workshop_user(raw),
             ),
             timeout=CHAT_TIMEOUT_SECONDS,
         )
@@ -146,7 +155,7 @@ async def chat(request: ChatRequest):
 
 
 @app.post("/chat/stream")
-async def chat_stream(request: ChatRequest):
+async def chat_stream(request: ChatRequest, raw: Request):
     """Stream status events, then the reply. The page shows noodling vs a Splunk tool call."""
     if request.provider and request.provider not in _configured_providers():
         raise HTTPException(400, f"'{request.provider}' has no API key configured in .env")
@@ -159,13 +168,18 @@ async def chat_stream(request: ChatRequest):
         model = model or (allowed[0] if allowed else None)
 
     queue: asyncio.Queue = asyncio.Queue()
+    user = _workshop_user(raw)
 
     async def run() -> None:
         token = bind_activity(queue)
         try:
             reply = await asyncio.wait_for(
                 run_traced_turn(
-                    request.message, request.conversation_id, provider=request.provider, model=model
+                    request.message,
+                    request.conversation_id,
+                    provider=request.provider,
+                    model=model,
+                    user=user,
                 ),
                 timeout=CHAT_TIMEOUT_SECONDS,
             )

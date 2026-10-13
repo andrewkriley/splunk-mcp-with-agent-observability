@@ -26,6 +26,7 @@ from galileo import galileo_context, log, start_session
 from galileo.constants import DEFAULT_CONSOLE_URL
 
 from app import mcp_client
+from app.workshop_user import galileo_session_name
 
 # Task-local so two overlapping /chat requests cannot share a Splunk session.
 _mcp_session: contextvars.ContextVar = contextvars.ContextVar("splunk_mcp_session")
@@ -106,9 +107,11 @@ def apply_galileo_console_url() -> str:
     return url
 
 
-def _galileo_session_id(conversation_id: str) -> str:
+def _galileo_session_id(conversation_id: str, user: str = "") -> str:
     if conversation_id not in _galileo_sessions:
-        _galileo_sessions[conversation_id] = start_session(name=f"workshop-chat-{conversation_id}")
+        _galileo_sessions[conversation_id] = start_session(
+            name=galileo_session_name(conversation_id, user)
+        )
     return _galileo_sessions[conversation_id]
 
 
@@ -481,7 +484,11 @@ async def call_splunk_tool(tool_name: str, arguments: dict) -> str:
 
 
 async def run_traced_turn(
-    user_message: str, conversation_id: str, provider: str | None = None, model: str | None = None
+    user_message: str,
+    conversation_id: str,
+    provider: str | None = None,
+    model: str | None = None,
+    user: str = "",
 ) -> str:
     from app.agent import _needs_splunk, run_agent_turn
 
@@ -491,7 +498,7 @@ async def run_traced_turn(
     with galileo_context(
         project=os.environ.get("GALILEO_PROJECT", "splunk-mcp-with-agent-observability"),
         log_stream=os.environ.get("GALILEO_LOG_STREAM", "default"),
-        session_id=_galileo_session_id(conversation_id),
+        session_id=_galileo_session_id(conversation_id, user),
     ):
         # Without an explicit start_trace/conclude, Splunk Agent Observability (Galileo) lazily creates the
         # trace from whichever child span happens to log first — so the trace's
