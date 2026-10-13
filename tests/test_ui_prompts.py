@@ -90,5 +90,21 @@ class LabGuideTests(unittest.TestCase):
         self.assertNotIn("SPLUNK_MCP_TOKEN", guide)
 
 
+class TracesPanelTests(unittest.TestCase):
+    def test_traces_tab_is_present_and_collapsed(self):
+        self.assertIn('id="traces-panel"', HTML)
+        self.assertIn('id="tab-traces"', HTML)
+        self.assertIn("My traces", HTML)
+        self.assertIn("/galileo/sessions", HTML)
+        self.assertIn("galileo_traces_panel", HTML)
+        self.assertIn("GALILEO_TRACES_PANEL", HTML)
+        self.assertIn("loadTraces", HTML)
+        start = HTML.index('id="traces-panel"')
+        chunk = HTML[start : start + 400]
+        self.assertIn("hidden", chunk)
+        self.assertNotIn("GALILEO_API_KEY", HTML)
+        self.assertNotIn("user=", HTML.lower().split("/galileo/sessions")[1][:80])
+
+
 if __name__ == "__main__":
     unittest.main()

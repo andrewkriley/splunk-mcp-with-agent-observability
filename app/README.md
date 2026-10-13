@@ -16,11 +16,17 @@ it connects directly.
 ## How it's built
 
 - **`main.py`** — FastAPI app. `GET /` serves `static/index.html`; `GET
-  /config` returns `{"providers": [...], "default_provider": "..."}` — only
-  providers with an API key set in `.env` are listed, plus `openai-spec` when
-  `OPENAI_SPEC_API_KEY`, `OPENAI_SPEC_BASE_URL`, and `OPENAI_SPEC_MODELS` are
-  all set. `openai_spec_models` in that response is the model list the page
-  shows in the header dropdown. `POST /chat` takes
+  /config` returns `{"providers": [...], "default_provider": "...",
+  "galileo_traces_panel": true|false}` — only providers with an API key set
+  in `.env` are listed, plus `openai-spec` when `OPENAI_SPEC_API_KEY`,
+  `OPENAI_SPEC_BASE_URL`, and `OPENAI_SPEC_MODELS` are all set.
+  `openai_spec_models` in that response is the model list the page shows in
+  the header dropdown. `galileo_traces_panel` is on when `GALILEO_API_KEY` is
+  set and `GALILEO_TRACES_PANEL` is not `0` / `false` / `no` / `off`.
+  `GET /galileo/sessions` lists Galileo sessions whose names start with
+  `{X-Mcp-Lab-User}-workshop-chat-`; `GET /galileo/sessions/{id}` returns
+  clipped span names. Both 404 when the panel is off. The key never leaves
+  the server. `POST /chat` takes
   `{"message": "...", "conversation_id": "...", "provider": "...", "model": "..."}`
   (provider optional, falls back to `LLM_PROVIDER`; `model` is the OpenAI-spec
   model selected in the UI) and returns `{"reply": "..."}`. An
@@ -43,6 +49,9 @@ it connects directly.
   call is in flight. Search stays disabled until the provider list loads, and
   again while a request is in flight. A reload
   starts a fresh Splunk Agent Observability (Galileo) session and a fresh history.
+  When `/config.galileo_traces_panel` is true, a collapsed **My traces** tab
+  lists this user's Galileo sessions from `GET /galileo/sessions` (no
+  `?user=`). Facilitators hide it with `GALILEO_TRACES_PANEL=0`.
 - **`mcp_client.py`** — connects to the Splunk MCP server at
   `<SPLUNK_INSTANCE_URL>:8089/services/mcp` (see `scripts/setup_mcp.py` for
   how that URL is derived) using the `mcp` Python SDK, authenticating with

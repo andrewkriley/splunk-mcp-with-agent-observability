@@ -16,7 +16,16 @@ from pydantic import BaseModel, Field, field_validator
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
-from app.observability import bind_activity, openai_spec_config, reset_activity, run_traced_turn  # noqa: E402 — import after load_dotenv sets env vars
+from app.galileo_traces import (  # noqa: E402 — import after load_dotenv sets env vars
+    fetch_session,
+    fetch_sessions,
+    filter_sessions,
+    public_session,
+    session_belongs,
+    session_prefix,
+    traces_panel_enabled,
+)
+from app.observability import bind_activity, openai_spec_config, reset_activity, run_traced_turn  # noqa: E402
 from app.workshop_user import workshop_user_from_value  # noqa: E402
 
 app = FastAPI(title="splunk-mcp-with-agent-observability")
@@ -75,6 +84,7 @@ class ConfigResponse(BaseModel):
     providers: list[str]
     default_provider: str
     openai_spec_models: list[str] = []
+    galileo_traces_panel: bool = False
 
 
 def _configured_providers() -> list[str]:
@@ -112,11 +122,51 @@ async def config():
         providers=providers,
         default_provider=default_provider,
         openai_spec_models=_openai_spec_models(),
+        galileo_traces_panel=traces_panel_enabled(),
     )
 
 
 def _workshop_user(raw: Request) -> str:
     return workshop_user_from_value(raw.headers.get("x-mcp-lab-user"))
+
+
+def _require_traces_panel() -> None:
+    if not traces_panel_enabled():
+        raise HTTPException(404, "Galileo traces panel is off (GALILEO_TRACES_PANEL=0)")
+
+
+@app.get("/me")
+async def me(raw: Request):
+    return {"user": _workshop_user(raw)}
+
+
+@app.get("/galileo/sessions")
+async def galileo_sessions(raw: Request):
+    _require_traces_panel()
+    user = _workshop_user(raw)
+    try:
+        records = fetch_sessions(user)
+    except Exception as exc:
+        raise HTTPException(502, _public_error(exc)) from None
+    sessions = [public_session(row) for row in filter_sessions(records, user)]
+    return {
+        "user": user,
+        "prefix": session_prefix(user),
+        "sessions": sessions,
+    }
+
+
+@app.get("/galileo/sessions/{session_id}")
+async def galileo_session_detail(session_id: str, raw: Request):
+    _require_traces_panel()
+    user = _workshop_user(raw)
+    try:
+        record = fetch_session(session_id)
+    except Exception as exc:
+        raise HTTPException(502, _public_error(exc)) from None
+    if not record or not session_belongs(str(record.get("name") or ""), user):
+        raise HTTPException(404, "session not found")
+    return public_session(record)
 
 
 @app.post("/chat", response_model=ChatResponse)
