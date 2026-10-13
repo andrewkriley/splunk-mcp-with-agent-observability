@@ -52,9 +52,11 @@ class ToolScopeTests(unittest.TestCase):
             {"name": "splunk_get_user_list"},
             {"name": "saia_generate_spl"},
             {"name": "splunk_get_indexes"},
+            {"name": "splunk_get_metadata"},
+            {"name": "splunk_get_index_info"},
         ]
         names = [tool["name"] for tool in _scoped_tools(tools, "general")]
-        self.assertEqual(names, ["splunk_run_query", "splunk_get_indexes"])
+        self.assertEqual(names, ["splunk_run_query", "splunk_get_metadata", "splunk_get_index_info"])
         self.assertIn("saia_generate_spl", EXCLUDED_TOOLS)
 
     def test_security_stays_on_its_allowlist(self):

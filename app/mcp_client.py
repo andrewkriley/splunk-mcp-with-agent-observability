@@ -10,6 +10,8 @@ import httpx2
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
+from app.search_controls import MAX_TOOL_RESULT_CHARS, note_control
+
 # Own handler so this shows in the uvicorn process even when the root logger
 # is left at WARNING. Lines name the endpoint host and the tool request only.
 _mcp_log = logging.getLogger("app.mcp")
@@ -79,4 +81,8 @@ async def call_tool(session: ClientSession, name: str, arguments: dict) -> str:
         payload = payload[:_MAX_ARGUMENT_CHARS] + "…"
     log_mcp_request("call", f"tool={name} arguments={payload}")
     result = await session.call_tool(name, arguments)
-    return "\n".join(block.text for block in result.content if hasattr(block, "text"))
+    text = "\n".join(block.text for block in result.content if hasattr(block, "text"))
+    if len(text) > MAX_TOOL_RESULT_CHARS:
+        note_control("truncated")
+        return text[:MAX_TOOL_RESULT_CHARS] + "\n…[truncated]"
+    return text

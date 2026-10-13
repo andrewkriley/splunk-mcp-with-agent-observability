@@ -87,16 +87,16 @@ it connects directly.
   against the real backend). A multi-category turn adds a synthesis `llm`
   span after the workers.
 
-  Two independent safety nets inside each worker loop, since a real LLM can
-  get stuck: `MAX_TURNS` caps the round count (8), and a repeated-call guard
-  stops if the model calls the exact same tool with the exact same arguments
-  again at any point in that worker's turn — a common real loop failure
-  mode, faster to catch than waiting for the cap. The guard is a set of
-  calls already made, so the repeat does not have to be the immediately
-  previous call. Either one tripping sets `status_code=1` on
-  the worker's (and supervisor's) agent span when it concludes, so a stuck
-  turn is visible/filterable in Splunk Agent Observability (Galileo) instead of just a silent fallback
-  message in the chat.
+  Safety nets inside each worker loop, since a real LLM can get stuck:
+  `MAX_TURNS` caps the round count (8) and the last round offers no tools so
+  the model must answer from results it already has; `MAX_SPLUNK_QUERIES`
+  (3) caps `splunk_run_query`; a repeated-call guard (whitespace-normalized
+  SPL) stops identical searches; large tool results are truncated. The
+  `general` category uses the same three search tools as `security` so the
+  model does not tour the full MCP catalog. When any of those controls
+  fire, the chat reply appends a short `Note:` comfort line. A hard stop
+  with no answer still sets `status_code=1` on the worker (and supervisor)
+  agent span so it is visible in Splunk Agent Observability (Galileo).
 
   The LLM calls (`call_openai`/`call_anthropic`/`call_gemini`) are plain
   sync functions, called directly. Two things that look like obvious

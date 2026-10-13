@@ -23,15 +23,16 @@ answer. In Splunk Agent Observability (Galileo) this renders as:
 
 Each loop repeats: call the LLM with the tools on offer -> if it asks for a
 tool call, run it via observability.call_splunk_tool (a Splunk Agent Observability (Galileo) `tool`
-span) and feed the result back -> otherwise return its final text. Two
-safety nets, independent of which provider/category is running:
-- MAX_TURNS caps the number of rounds.
-- A repeated-identical-tool-call guard stops if the model calls the exact
-  same tool with the exact same arguments again later in the same turn — a
-  common real loop failure mode, faster to catch than waiting for the turn cap.
-Either one tripping sets status_code=1 on the worker's agent span when it
-concludes, so a stuck turn is visible/filterable in Splunk Agent Observability (Galileo) rather than
-just a silent fallback message in the chat.
+span) and feed the result back -> otherwise return its final text. Safety
+nets, independent of which provider/category is running:
+- MAX_TURNS caps the number of rounds; the last round offers no tools so the
+  model must answer from results it already has.
+- MAX_SPLUNK_QUERIES caps splunk_run_query calls per worker.
+- A repeated-call guard (whitespace-normalized SPL) stops identical searches.
+- Large tool results are truncated before they re-enter the prompt.
+When any of those controls fire, the user-visible reply gets a short comfort
+note. Either a hard stop with no answer still sets status_code=1 on the
+worker agent span so it is visible in Splunk Agent Observability (Galileo).
 
 The LLM calls (call_openai/call_anthropic/call_gemini) are plain sync
 functions, called directly — not via asyncio.to_thread (confirmed broken:
@@ -58,15 +59,20 @@ import re
 
 from galileo import galileo_context, log
 
-from app import observability
+from app import observability, search_controls
 
 MAX_TURNS = 8
 
 BASE_SYSTEM_PROMPT = """\
 You are an AI assistant helping a workshop participant explore their Splunk \
 environment through Splunk MCP tools. Prefer splunk_run_query with explicit \
-SPL over any other search-generation tool. Be concise and cite concrete \
-numbers or index names from the tool results in your answer."""
+SPL over any other search-generation tool. Use at most two or three tool \
+calls. Prefer one focused splunk_run_query with `| head 20` or `stats` over \
+browsing indexes. After a useful non-empty result, stop and answer. Do not \
+keep searching to refine unless the result is empty or an error. Indexes on \
+this instance are named in this prompt — you do not need to list them unless \
+asked. Be concise and cite concrete numbers or index names from the tool \
+results in your answer."""
 
 SECURITY_SYSTEM_PROMPT = (
     BASE_SYSTEM_PROMPT
@@ -126,7 +132,7 @@ GENERAL_EXCLUDED_TOOLS = EXCLUDED_TOOLS | {"splunk_get_user_list"}
 CATEGORY_TOOL_NAMES = {
     "security": {"splunk_run_query", "splunk_get_metadata", "splunk_get_index_info"},
     "infra": {"splunk_run_query", "splunk_get_metadata", "splunk_get_index_info", "splunk_get_kv_store_collections"},
-    "general": None,  # every tool except EXCLUDED_TOOLS
+    "general": {"splunk_run_query", "splunk_get_metadata", "splunk_get_index_info"},
 }
 
 SECURITY_KEYWORDS = [
@@ -331,6 +337,7 @@ async def run_agent_turn(
     model: str | None = None,
     use_splunk: bool = True,
 ) -> str:
+    search_controls.reset_controls()
     provider = provider or os.environ.get("LLM_PROVIDER", "anthropic")
     history = list(history or [])
     selected_provider, selected_model, endpoint = observability.describe_llm(provider, model)
@@ -341,6 +348,7 @@ async def run_agent_turn(
 
     if not use_splunk:
         result, status_code = await _run_worker(user_message, [], provider, "chat", history, model)
+        result = search_controls.with_comfort_notes(result)
         logger.conclude(output=result, status_code=status_code)
         return result
 
@@ -358,6 +366,7 @@ async def run_agent_turn(
     else:
         final = await _synthesize(user_message, worker_results, provider, history, model)
 
+    final = search_controls.with_comfort_notes(final)
     logger.conclude(output=final, status_code=worst_status)  # closes the supervisor span
     return final
 
@@ -398,6 +407,55 @@ def _gemini_contents(history: list[dict], user_message: str) -> list:
     return contents
 
 
+def _tools_for_round(round_i: int, query_count: int, tools: list, had_tool_result: bool) -> list:
+    if round_i < MAX_TURNS - 1 and query_count < search_controls.MAX_SPLUNK_QUERIES:
+        return tools
+    if had_tool_result:
+        if query_count >= search_controls.MAX_SPLUNK_QUERIES:
+            search_controls.note_control("query_cap")
+        if round_i >= MAX_TURNS - 1:
+            search_controls.note_control("forced_final")
+    return []
+
+
+async def _invoke_splunk_tools(
+    declared: list[tuple[str, dict, object]],
+    seen_calls: set[tuple[str, str]],
+    query_count: int,
+) -> tuple[list[tuple[object, str]], int, str | None]:
+    results: list[tuple[object, str]] = []
+    for name, arguments, handle in declared:
+        call_key = search_controls.fingerprint(name, arguments)
+        if call_key in seen_calls:
+            search_controls.note_control("repeat")
+            return results, query_count, "repeat"
+        seen_calls.add(call_key)
+        if search_controls.is_query_tool(name):
+            if query_count >= search_controls.MAX_SPLUNK_QUERIES:
+                search_controls.note_control("query_cap")
+                return results, query_count, "query_cap"
+            query_count += 1
+        await observability.announce("tool", name)
+        text = await observability.call_splunk_tool(name, arguments)
+        results.append((handle, text))
+    return results, query_count, None
+
+
+def _skipped_tool_content(reason: str) -> str:
+    if reason == "repeat":
+        return "Skipped: repeated identical Splunk search."
+    return "Skipped: Splunk search budget for this turn is used."
+
+
+async def _openai_final(messages: list[dict], system_prompt: str, client_settings: dict | None) -> tuple[str, int]:
+    await observability.announce("model")
+    response = observability.call_openai(messages, [], system_prompt, **(client_settings or {}))
+    message = response.choices[0].message
+    if message.content:
+        return message.content, 0
+    return _empty_answer_message(), 1
+
+
 async def _openai_loop(
     user_message: str,
     mcp_tools: list[dict],
@@ -411,29 +469,51 @@ async def _openai_loop(
     ]
     messages = [*history, {"role": "user", "content": user_message}]
     seen_calls: set[tuple[str, str]] = set()
+    query_count = 0
+    had_tool_result = False
 
-    for _ in range(MAX_TURNS):
+    for round_i in range(MAX_TURNS):
+        offer = _tools_for_round(round_i, query_count, tools, had_tool_result)
         await observability.announce("model")
-        response = observability.call_openai(messages, tools, system_prompt, **(client_settings or {}))
+        response = observability.call_openai(messages, offer, system_prompt, **(client_settings or {}))
         message = response.choices[0].message
         if not message.tool_calls:
             if not message.content:
                 return _empty_answer_message(), 1
             return message.content, 0
+        if not offer:
+            if message.content:
+                return message.content, 0
+            return _empty_answer_message(), 1
 
         messages.append(message.model_dump(exclude_unset=True))
+        declared = []
         for tool_call in message.tool_calls:
             arguments = json.loads(tool_call.function.arguments or "{}")
-            call_key = (tool_call.function.name, json.dumps(arguments, sort_keys=True))
-            if call_key in seen_calls:
-                return _repeated_call_message(tool_call.function.name), 1
-            seen_calls.add(call_key)
+            declared.append((tool_call.function.name, arguments, tool_call.id))
+        results, query_count, stop = await _invoke_splunk_tools(declared, seen_calls, query_count)
+        had_tool_result = had_tool_result or bool(results)
+        for handle, text in results:
+            messages.append({"role": "tool", "tool_call_id": handle, "content": text})
+        if stop:
+            for name, arguments, handle in declared[len(results) :]:
+                messages.append(
+                    {"role": "tool", "tool_call_id": handle, "content": _skipped_tool_content(stop)}
+                )
+            search_controls.note_control("forced_final")
+            return await _openai_final(messages, system_prompt, client_settings)
 
-            await observability.announce("tool", tool_call.function.name)
-            result = await observability.call_splunk_tool(tool_call.function.name, arguments)
-            messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": result})
+    search_controls.note_control("forced_final")
+    return await _openai_final(messages, system_prompt, client_settings)
 
-    return _turn_limit_message(), 1
+
+async def _anthropic_final(messages: list[dict], system_prompt: str) -> tuple[str, int]:
+    await observability.announce("model")
+    response = observability.call_anthropic(messages, [], system_prompt)
+    text = "".join(block.text for block in response.content if block.type == "text")
+    if text:
+        return text, 0
+    return _empty_answer_message(), 1
 
 
 async def _anthropic_loop(
@@ -442,31 +522,50 @@ async def _anthropic_loop(
     tools = [{"name": t["name"], "description": t["description"], "input_schema": t["input_schema"]} for t in mcp_tools]
     messages = [*history, {"role": "user", "content": user_message}]
     seen_calls: set[tuple[str, str]] = set()
+    query_count = 0
+    had_tool_result = False
 
-    for _ in range(MAX_TURNS):
+    for round_i in range(MAX_TURNS):
+        offer = _tools_for_round(round_i, query_count, tools, had_tool_result)
         await observability.announce("model")
-        response = observability.call_anthropic(messages, tools, system_prompt)
+        response = observability.call_anthropic(messages, offer, system_prompt)
         tool_uses = [block for block in response.content if block.type == "tool_use"]
         if not tool_uses:
             text = "".join(block.text for block in response.content if block.type == "text")
             if not text:
                 return _empty_answer_message(), 1
             return text, 0
+        if not offer:
+            text = "".join(block.text for block in response.content if block.type == "text")
+            if text:
+                return text, 0
+            return _empty_answer_message(), 1
 
         messages.append({"role": "assistant", "content": response.content})
-        tool_results = []
-        for block in tool_uses:
-            call_key = (block.name, json.dumps(block.input, sort_keys=True))
-            if call_key in seen_calls:
-                return _repeated_call_message(block.name), 1
-            seen_calls.add(call_key)
-
-            await observability.announce("tool", block.name)
-            result = await observability.call_splunk_tool(block.name, block.input)
-            tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": result})
+        declared = [(block.name, dict(block.input or {}), block.id) for block in tool_uses]
+        results, query_count, stop = await _invoke_splunk_tools(declared, seen_calls, query_count)
+        had_tool_result = had_tool_result or bool(results)
+        tool_results = [{"type": "tool_result", "tool_use_id": handle, "content": text} for handle, text in results]
+        if stop:
+            for name, arguments, handle in declared[len(results) :]:
+                tool_results.append(
+                    {"type": "tool_result", "tool_use_id": handle, "content": _skipped_tool_content(stop)}
+                )
         messages.append({"role": "user", "content": tool_results})
+        if stop:
+            search_controls.note_control("forced_final")
+            return await _anthropic_final(messages, system_prompt)
 
-    return _turn_limit_message(), 1
+    search_controls.note_control("forced_final")
+    return await _anthropic_final(messages, system_prompt)
+
+
+async def _gemini_final(contents: list, system_prompt: str) -> tuple[str, int]:
+    await observability.announce("model")
+    response = observability.call_gemini(contents, [], system_prompt)
+    if response.text:
+        return response.text, 0
+    return _empty_answer_message(), 1
 
 
 async def _gemini_loop(
@@ -479,31 +578,44 @@ async def _gemini_loop(
     ]
     contents = _gemini_contents(history, user_message)
     seen_calls: set[tuple[str, str]] = set()
+    query_count = 0
+    had_tool_result = False
 
-    for _ in range(MAX_TURNS):
+    for round_i in range(MAX_TURNS):
+        offer = _tools_for_round(round_i, query_count, tools, had_tool_result)
         await observability.announce("model")
-        response = observability.call_gemini(contents, tools, system_prompt)
+        response = observability.call_gemini(contents, offer, system_prompt)
         calls = response.function_calls or []
         if not calls:
             if not response.text:
                 return _empty_answer_message(), 1
             return response.text, 0
+        if not offer:
+            if response.text:
+                return response.text, 0
+            return _empty_answer_message(), 1
 
         contents.append(response.candidates[0].content)
-        result_parts = []
-        for call in calls:
-            args = dict(call.args or {})
-            call_key = (call.name, json.dumps(args, sort_keys=True))
-            if call_key in seen_calls:
-                return _repeated_call_message(call.name), 1
-            seen_calls.add(call_key)
-
-            await observability.announce("tool", call.name)
-            result = await observability.call_splunk_tool(call.name, args)
-            result_parts.append(types.Part.from_function_response(name=call.name, response={"result": result}))
+        declared = [(call.name, dict(call.args or {}), call.name) for call in calls]
+        results, query_count, stop = await _invoke_splunk_tools(declared, seen_calls, query_count)
+        had_tool_result = had_tool_result or bool(results)
+        result_parts = [
+            types.Part.from_function_response(name=handle, response={"result": text}) for handle, text in results
+        ]
+        if stop:
+            for name, arguments, handle in declared[len(results) :]:
+                result_parts.append(
+                    types.Part.from_function_response(
+                        name=handle, response={"result": _skipped_tool_content(stop)}
+                    )
+                )
         contents.append(types.Content(role="user", parts=result_parts))
+        if stop:
+            search_controls.note_control("forced_final")
+            return await _gemini_final(contents, system_prompt)
 
-    return _turn_limit_message(), 1
+    search_controls.note_control("forced_final")
+    return await _gemini_final(contents, system_prompt)
 
 
 def _empty_answer_message() -> str:
@@ -511,14 +623,3 @@ def _empty_answer_message() -> str:
         "The model finished without producing a final answer — this can happen on a demanding "
         "question if it runs out of response budget. Try asking again or narrowing the question."
     )
-
-
-def _repeated_call_message(tool_name: str) -> str:
-    return (
-        f"Stopped after detecting a repeated identical call to {tool_name} — the model may be stuck. "
-        "Try rephrasing your question."
-    )
-
-
-def _turn_limit_message() -> str:
-    return "Reached the tool-call limit for this turn without a final answer."
