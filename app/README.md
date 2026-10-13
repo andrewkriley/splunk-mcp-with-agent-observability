@@ -52,11 +52,14 @@ it connects directly.
   loop:
   - A **supervisor** agent span (`agent_type="supervisor"`) wraps the whole
     turn.
-  - A whole-word keyword check decides whether to open Splunk MCP. Security
-    and infra words, plus `splunk`, `index`, `search`, `oidemo`, `infra`,
-    `security`, `threats`, and `events`, count as
-    Splunk intent, including when they appear in a recent user turn so a
-    follow-up still searches. Anything else is a direct chat reply with no
+  - `SPLUNK_INTENT_MODE` decides whether to open Splunk MCP: `keywords`
+    (static list), `model` (a yes/no call to the selected LLM), or `both`
+    (list first; the model is asked only on a miss). `model` is the
+    workshop default so misspellings such as `noteables` still search.
+    Security and infra words, plus `splunk`, `index`, `search`, `oidemo`,
+    `infra`, `security`, `threats`, and `events`, count as list hits,
+    including when they appear in a recent user turn so a follow-up still
+    searches. Anything the gate rejects is a direct chat reply with no
     tools and no MCP session.
   - A **classifier** agent span (`agent_type="classifier"`) runs only for a
     Splunk question and picks one or more categories — `security`, `infra`,

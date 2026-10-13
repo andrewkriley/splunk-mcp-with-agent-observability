@@ -1,8 +1,11 @@
 """Supervisor -> classifier -> scoped worker(s): the agent structure for one chat turn.
 
-For each turn: a "supervisor" agent span wraps the whole thing. A whole-word
-keyword check decides whether this question, or an earlier user turn in the
-same conversation, is about Splunk. If it is not, the turn is one chat worker
+For each turn: a "supervisor" agent span wraps the whole thing. Whether the
+question needs Splunk is decided by SPLUNK_INTENT_MODE: the static keyword
+list, a yes/no call to the selected model, or both (the list wins on a hit,
+and the model is asked only when the list misses). Workshop default is
+model so misspellings such as noteables still open MCP. If it is not a
+Splunk question, the turn is one chat worker
 with no tools and Splunk MCP is not opened. If it is, a "classifier" agent
 span (the same keyword heuristic, not an LLM call — keeps this deterministic
 and free of extra API cost/latency) picks one or more categories
@@ -49,6 +52,7 @@ observability gap only; the chat app's answers are correct regardless.
 """
 
 import json
+import logging
 import os
 import re
 
@@ -151,17 +155,125 @@ SPLUNK_INTENT_KEYWORDS = [
 ]
 
 
+INTENT_MODES = ("keywords", "model", "both")
+INTENT_ROUTER_SYSTEM = """\
+You decide if a workshop question needs a live search of the user's Splunk data.
+Reply with one word: yes or no.
+Say yes for indexes, events, metrics, security alerts, or notable events, including misspellings such as noteables for notables.
+Say no for greetings, questions about you, or anything that does not need their Splunk data.
+"""
+
+_intent_log = logging.getLogger("app.llm")
+
+
+def intent_mode() -> str:
+    """keywords, model, or both. An unknown value stays on the static list."""
+    mode = os.environ.get("SPLUNK_INTENT_MODE", "keywords").strip().lower()
+    return mode if mode in INTENT_MODES else "keywords"
+
+
 def _matches_any(text: str, keywords: list[str]) -> bool:
     return any(re.search(rf"\b{re.escape(keyword)}\b", text, flags=re.IGNORECASE) for keyword in keywords)
 
 
-def _needs_splunk(user_message: str, history: list[dict] | None = None) -> bool:
-    """True when this question or a recent user turn is a Splunk data question."""
+def _keyword_needs_splunk(user_message: str, history: list[dict] | None = None) -> bool:
     texts = [user_message]
     for message in history or []:
         if message.get("role") == "user":
             texts.append(message.get("content") or "")
     return any(_matches_any(text, SPLUNK_INTENT_KEYWORDS) for text in texts)
+
+
+def _parse_yes_no(text: str) -> bool | None:
+    match = re.match(r"\s*(yes|no)\b", text, flags=re.IGNORECASE)
+    if match is None:
+        match = re.search(r"\b(yes|no)\b", text, flags=re.IGNORECASE)
+    if match is None:
+        return None
+    return match.group(1).lower() == "yes"
+
+
+def _router_text(provider: str, model: str | None, question: str) -> str:
+    """One yes/no completion from the selected provider. No tools."""
+    if provider in {"openai", "openai-spec"}:
+        settings = observability.openai_client_settings(provider, model)
+        response = observability.call_openai(
+            [{"role": "user", "content": question}],
+            [],
+            INTENT_ROUTER_SYSTEM,
+            model=settings.get("model"),
+            api_key=settings.get("api_key"),
+            base_url=settings.get("base_url"),
+            name=settings.get("name", "openai"),
+        )
+        logged = observability._openai_output_message(response.choices[0])
+        return logged["content"] or logged.get("reasoning") or ""
+    if provider == "gemini":
+        from google.genai import types
+
+        response = observability.call_gemini(
+            [types.Content(role="user", parts=[types.Part.from_text(text=question)])],
+            [],
+            INTENT_ROUTER_SYSTEM,
+        )
+        return response.text or ""
+    response = observability.call_anthropic(
+        [{"role": "user", "content": question}],
+        [],
+        INTENT_ROUTER_SYSTEM,
+    )
+    return observability._anthropic_content_to_log(response.content)
+
+
+def _model_needs_splunk(
+    user_message: str,
+    history: list[dict] | None,
+    provider: str | None,
+    model: str | None,
+) -> bool | None:
+    selected = (provider or os.environ.get("LLM_PROVIDER", "anthropic")).strip().lower()
+    lines = [user_message]
+    for message in history or []:
+        if message.get("role") == "user" and message.get("content"):
+            lines.append(message["content"])
+    question = "\n".join(f"User: {text}" for text in lines[:4])
+    return _parse_yes_no(_router_text(selected, model, question))
+
+
+def _log_intent(mode: str, source: str, open_splunk: bool, **detail: str) -> None:
+    extra = " ".join(f"{key}={value}" for key, value in detail.items())
+    _intent_log.info(
+        "Intent source=%s mode=%s decision=%s%s",
+        source,
+        mode,
+        "open" if open_splunk else "skip",
+        f" {extra}" if extra else "",
+    )
+
+
+def _needs_splunk(
+    user_message: str,
+    history: list[dict] | None = None,
+    provider: str | None = None,
+    model: str | None = None,
+) -> bool:
+    """True when this question should open Splunk MCP."""
+    mode = intent_mode()
+    keyword_hit = _keyword_needs_splunk(user_message, history)
+    keywords = "hit" if keyword_hit else "miss"
+    if mode == "keywords" or (mode == "both" and keyword_hit):
+        _log_intent(mode, "keyword-list", keyword_hit, keywords=keywords)
+        return keyword_hit
+    try:
+        decision = _model_needs_splunk(user_message, history, provider, model)
+    except Exception as exc:
+        _log_intent(mode, "keyword-list", keyword_hit, keywords=keywords, reason="router-error", error=str(exc))
+        return keyword_hit
+    if decision is None:
+        _log_intent(mode, "keyword-list", keyword_hit, keywords=keywords, reason="router-unparsed")
+        return keyword_hit
+    _log_intent(mode, "model-router", decision, keywords=keywords)
+    return decision
 
 
 @log(span_type="agent", name="classifier", params={"agent_type": "classifier"})

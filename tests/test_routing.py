@@ -1,6 +1,7 @@
 """Routing, history, and per-request MCP session behavior."""
 
 import asyncio
+import os
 import unittest
 
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -8,9 +9,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from app.agent import (
     EXCLUDED_TOOLS,
     INFRA_KEYWORDS,
+    INTENT_ROUTER_SYSTEM,
     SECURITY_KEYWORDS,
     _matches_any,
     _needs_splunk,
+    _parse_yes_no,
     _scoped_tools,
     run_agent_turn,
 )
@@ -66,6 +69,16 @@ class ToolScopeTests(unittest.TestCase):
 
 
 class IntentGateTests(unittest.TestCase):
+    def setUp(self):
+        self.previous_mode = os.environ.get("SPLUNK_INTENT_MODE")
+        os.environ["SPLUNK_INTENT_MODE"] = "keywords"
+
+    def tearDown(self):
+        if self.previous_mode is None:
+            os.environ.pop("SPLUNK_INTENT_MODE", None)
+        else:
+            os.environ["SPLUNK_INTENT_MODE"] = self.previous_mode
+
     def test_plain_question_skips_splunk(self):
         self.assertFalse(_needs_splunk("what model provider are we using"))
 
@@ -85,6 +98,69 @@ class IntentGateTests(unittest.TestCase):
     def test_added_trigger_words_open_splunk(self):
         for question in ("check infra", "review security", "any threats", "show events"):
             self.assertTrue(_needs_splunk(question), question)
+
+    def test_noteables_misses_the_static_list(self):
+        self.assertFalse(_needs_splunk("what noteables do we have"))
+        self.assertFalse(_matches_any("what noteables do we have", SECURITY_KEYWORDS))
+        self.assertTrue(_needs_splunk("any high severity notables in the last 30 days"))
+
+    def test_yes_no_parser_reads_a_leading_answer(self):
+        self.assertTrue(_parse_yes_no("yes"))
+        self.assertFalse(_parse_yes_no("No, that is a greeting."))
+        self.assertIsNone(_parse_yes_no("not sure"))
+
+    def test_router_prompt_teaches_the_noteables_misspelling(self):
+        self.assertIn("noteables", INTENT_ROUTER_SYSTEM)
+        self.assertIn("notables", INTENT_ROUTER_SYSTEM)
+        self.assertIn("yes or no", INTENT_ROUTER_SYSTEM)
+
+    def test_model_mode_asks_the_llm_for_noteables_and_notables(self):
+        os.environ["SPLUNK_INTENT_MODE"] = "model"
+        seen = []
+
+        def fake_router(_provider, _model, question):
+            seen.append(question)
+            return "yes"
+
+        with patch("app.agent._router_text", fake_router):
+            self.assertTrue(
+                _needs_splunk(
+                    "what noteables do we have",
+                    provider="openai-spec",
+                    model="bedrock-claude",
+                )
+            )
+            self.assertTrue(
+                _needs_splunk(
+                    "show notables",
+                    provider="openai-spec",
+                    model="bedrock-claude",
+                )
+            )
+        self.assertEqual(len(seen), 2)
+        self.assertIn("noteables", seen[0])
+        self.assertIn("notables", seen[1])
+
+    def test_both_asks_the_model_only_when_the_list_misses(self):
+        os.environ["SPLUNK_INTENT_MODE"] = "both"
+        with patch("app.agent._model_needs_splunk", return_value=True) as router:
+            self.assertTrue(_needs_splunk("what noteables do we have", provider="openai-spec"))
+            self.assertTrue(_needs_splunk("show notables"))
+        router.assert_called_once()
+
+    def test_model_mode_can_decline_a_keyword_hit(self):
+        os.environ["SPLUNK_INTENT_MODE"] = "model"
+        with patch("app.agent._model_needs_splunk", return_value=False) as router:
+            self.assertFalse(_needs_splunk("show notables"))
+        router.assert_called_once()
+
+    def test_router_error_falls_back_to_the_keyword_list(self):
+        os.environ["SPLUNK_INTENT_MODE"] = "both"
+        with patch("app.agent._model_needs_splunk", side_effect=RuntimeError("router down")):
+            self.assertFalse(_needs_splunk("what noteables do we have"))
+        os.environ["SPLUNK_INTENT_MODE"] = "model"
+        with patch("app.agent._model_needs_splunk", side_effect=RuntimeError("router down")):
+            self.assertTrue(_needs_splunk("show notables"))
 
     def test_chat_category_is_offered_no_tools(self):
         tools = [{"name": "splunk_run_query", "description": "", "input_schema": {}}]
@@ -143,6 +219,46 @@ class IntentGateTests(unittest.TestCase):
             reply = asyncio.run(run_traced_turn("show notables", "gate-splunk"))
 
         self.assertEqual(reply, "3 notables")
+        session.__aenter__.assert_awaited()
+        args, kwargs = fake_turn.seen
+        self.assertEqual(args[1], tools)
+        self.assertNotIn("use_splunk", kwargs)
+
+    def test_noteables_model_mode_opens_mcp(self):
+        os.environ["SPLUNK_INTENT_MODE"] = "model"
+        logger = MagicMock()
+        context = MagicMock()
+        context.__enter__.return_value = None
+        context.__exit__.return_value = False
+        galileo = MagicMock(return_value=context)
+        galileo.get_logger_instance.return_value = logger
+        session = AsyncMock()
+        session.__aenter__.return_value = "live-session"
+        tools = [{"name": "splunk_run_query", "description": "", "input_schema": {}}]
+
+        async def fake_turn(*args, **kwargs):
+            fake_turn.seen = (args, kwargs)
+            return "4 notable events"
+
+        with (
+            patch("app.observability.apply_galileo_console_url"),
+            patch("app.observability._galileo_session_id", return_value="sess"),
+            patch("app.observability.galileo_context", galileo),
+            patch("app.observability.mcp_client.splunk_mcp_session", return_value=session),
+            patch("app.observability.mcp_client.list_splunk_tools", AsyncMock(return_value=tools)),
+            patch("app.agent._router_text", return_value="yes"),
+            patch("app.agent.run_agent_turn", fake_turn),
+        ):
+            reply = asyncio.run(
+                run_traced_turn(
+                    "what noteables do we have",
+                    "gate-noteables",
+                    provider="openai-spec",
+                    model="bedrock-claude",
+                )
+            )
+
+        self.assertEqual(reply, "4 notable events")
         session.__aenter__.assert_awaited()
         args, kwargs = fake_turn.seen
         self.assertEqual(args[1], tools)

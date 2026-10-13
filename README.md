@@ -51,7 +51,7 @@ A small web app with a chat interface, backed by an AI agent that:
  Browser (chat UI)
        │
        ▼
-   FastAPI app ──► supervisor agent ──► classifier (keyword categories)
+   FastAPI app ──► supervisor agent ──► LLM intent router + classifier (keyword categories)
        │                 │
        │                 ▼
        │           worker agent(s) ──► LLM API (Anthropic / OpenAI / Gemini)

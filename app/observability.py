@@ -494,7 +494,7 @@ async def run_traced_turn(
 
     apply_galileo_console_url()
     history = prior_turns(conversation_id)
-    use_splunk = _needs_splunk(user_message, history)
+    use_splunk = _needs_splunk(user_message, history, provider=provider, model=model)
     with galileo_context(
         project=os.environ.get("GALILEO_PROJECT", "splunk-mcp-with-agent-observability"),
         log_stream=os.environ.get("GALILEO_LOG_STREAM", "default"),
