@@ -154,10 +154,13 @@ it connects directly.
   then cached). Follow-up turns `set_session` that id so they stay in one
   session; a page refresh mints a new `conversation_id` and a new session.
   Each turn calls `start_trace(input=user_message)` /
-  `conclude(output=result, conclude_all=True)` / `flush()` so the first
-  question's input/output is visible without closing the session. Do not
-  pass `session_id=` into `galileo_context(...)` — that starts the session
-  on the default logger before the workshop project is bound.
+  `conclude(output=result, conclude_all=True)` / `flush()`, then stamps the
+  session row via `/ingest/traces` so the session list/card shows the first
+  question as input and the latest reply as output (Galileo has no session
+  PATCH; `start_session` creates an empty parent). The intent router runs
+  after `start_trace` so it is a span under that turn, not a sibling trace.
+  Do not pass `session_id=` into `galileo_context(...)` — that starts the
+  session on the default logger before the workshop project is bound.
 
 If you're building your own version instead of using this one, this is the
 same build order: MCP client → LLM adapter/agent loop → Splunk Agent Observability (Galileo) tracing →

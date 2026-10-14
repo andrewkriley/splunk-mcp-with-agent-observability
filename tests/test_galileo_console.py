@@ -3,18 +3,21 @@
 import os
 import unittest
 
-from app.observability import apply_galileo_console_url, galileo_console_url
+from app.observability import apply_galileo_console_url, galileo_api_url, galileo_console_url
 
 
 class GalileoConsoleUrlTests(unittest.TestCase):
     def setUp(self):
-        self.previous = os.environ.get("GALILEO_CONSOLE_URL")
+        self.previous = {
+            name: os.environ.get(name) for name in ("GALILEO_CONSOLE_URL", "GALILEO_API_URL")
+        }
 
     def tearDown(self):
-        if self.previous is None:
-            os.environ.pop("GALILEO_CONSOLE_URL", None)
-        else:
-            os.environ["GALILEO_CONSOLE_URL"] = self.previous
+        for name, value in self.previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
     def test_blank_uses_the_sdk_default(self):
         os.environ.pop("GALILEO_CONSOLE_URL", None)
@@ -33,3 +36,10 @@ class GalileoConsoleUrlTests(unittest.TestCase):
         os.environ["GALILEO_CONSOLE_URL"] = "https://user:secret@console.example.com"
         with self.assertRaises(ValueError):
             galileo_console_url()
+
+    def test_api_host_follows_the_console(self):
+        os.environ.pop("GALILEO_API_URL", None)
+        os.environ["GALILEO_CONSOLE_URL"] = "https://console.multitenant.galileocloud.io"
+        self.assertEqual(galileo_api_url(), "https://api.multitenant.galileocloud.io")
+        os.environ.pop("GALILEO_CONSOLE_URL", None)
+        self.assertEqual(galileo_api_url(), "https://api.galileo.ai")

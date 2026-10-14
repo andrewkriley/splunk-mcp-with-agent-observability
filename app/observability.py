@@ -19,7 +19,11 @@ import json
 import logging
 import os
 import time
+import urllib.error
+import urllib.request
+import uuid
 from collections import OrderedDict
+from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
 from galileo import galileo_context, log, start_session
@@ -34,6 +38,7 @@ _mcp_session: contextvars.ContextVar = contextvars.ContextVar("splunk_mcp_sessio
 _activity: contextvars.ContextVar[asyncio.Queue | None] = contextvars.ContextVar("chat_activity", default=None)
 _galileo_sessions: dict[str, str] = {}  # conversation_id -> Splunk Agent Observability (Galileo) session_id, so every
                                           # turn in one browser conversation lands in one session
+_galileo_session_inputs: dict[str, str] = {}  # first user question per conversation; session list keeps this input
 
 # Prior user/assistant text only. Tool transcripts stay inside the turn that made them.
 MAX_HISTORY_TURNS = 8
@@ -105,6 +110,103 @@ def apply_galileo_console_url() -> str:
     if os.environ.get("GALILEO_CONSOLE_URL", "").strip():
         os.environ["GALILEO_CONSOLE_URL"] = url
     return url
+
+
+def galileo_api_url() -> str:
+    """REST API host. GALILEO_API_URL wins; otherwise derive from the console URL."""
+    configured = os.environ.get("GALILEO_API_URL", "").strip()
+    if configured:
+        value = configured if "://" in configured else f"https://{configured}"
+        parsed = urlsplit(value)
+        if parsed.scheme not in {"https", "http"} or not parsed.hostname:
+            raise ValueError("GALILEO_API_URL must be an http(s) URL with a host")
+        if parsed.username or parsed.password:
+            raise ValueError("GALILEO_API_URL must not include a username or password")
+        return value.rstrip("/")
+    console = galileo_console_url()
+    parsed = urlsplit(console)
+    host = parsed.hostname or ""
+    if host.startswith("console."):
+        host = "api." + host[len("console.") :]
+    elif host == "app.galileo.ai":
+        host = "api.galileo.ai"
+    return f"{parsed.scheme}://{host}".rstrip("/")
+
+
+def session_io_for_turn(conversation_id: str, user_message: str, result: str) -> tuple[str, str]:
+    """Session list input stays the first question; output is the latest reply."""
+    first = _galileo_session_inputs.setdefault(conversation_id, user_message)
+    return first, result
+
+
+def _uuid_text(value: object) -> str | None:
+    text = str(value or "").strip()
+    if len(text) == 36 and text.count("-") == 4:
+        return text
+    return None
+
+
+def _stamp_session_io(
+    logger,
+    conversation_id: str,
+    user_message: str,
+    result: str,
+    session_id: str,
+) -> None:
+    """POST a complete root trace so the session list/card copies input/output.
+
+    ``start_session`` creates an empty session. SDK flush attaches child traces
+    but leaves the session row blank. Galileo has no session PATCH; a complete
+    ``/ingest/traces`` record on that session_id fills the list I/O. Follow-ups
+    keep the first question and replace the output.
+    """
+    key = os.environ.get("GALILEO_API_KEY", "").strip()
+    project_id = _uuid_text(getattr(logger, "project_id", None)) or os.environ.get(
+        "GALILEO_PROJECT_ID", ""
+    ).strip()
+    sid = _uuid_text(session_id) or session_id
+    if not key or not project_id or not sid:
+        return
+    first, output = session_io_for_turn(conversation_id, user_message, result)
+    payload: dict = {
+        "traces": [
+            {
+                "type": "trace",
+                "id": str(uuid.uuid4()),
+                "name": "workshop-chat",
+                "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                "input": first,
+                "output": output,
+                "status_code": 200,
+                "metrics": {"duration_ns": 0},
+                "spans": [],
+            }
+        ],
+        "logging_method": "api_direct",
+        "reliable": True,
+        "is_complete": True,
+        "session_id": sid,
+        "session_external_id": conversation_id,
+    }
+    stream_id = _uuid_text(getattr(logger, "log_stream_id", None))
+    if stream_id:
+        payload["log_stream_id"] = stream_id
+    url = f"{galileo_api_url()}/ingest/traces/{project_id}"
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode(),
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Galileo-API-Key": key,
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15):
+            pass
+    except (urllib.error.URLError, TimeoutError, OSError):
+        _llm_log.warning("Galileo session I/O stamp failed")
 
 
 def _galileo_session_id(conversation_id: str, user: str = "") -> str:
@@ -504,7 +606,6 @@ async def run_traced_turn(
 
     apply_galileo_console_url()
     history = prior_turns(conversation_id)
-    use_splunk = _needs_splunk(user_message, history, provider=provider, model=model)
     with galileo_context(
         project=os.environ.get("GALILEO_PROJECT", "splunk-mcp-with-agent-observability"),
         log_stream=os.environ.get("GALILEO_LOG_STREAM", "default"),
@@ -512,13 +613,17 @@ async def run_traced_turn(
         # Bind the session after the context is entered so it is created on this
         # project/log stream. Do not pass session_id= into galileo_context():
         # Python evaluates that argument first, on the default logger.
-        galileo_context.set_session(_galileo_session_id(conversation_id, user))
+        session_id = _galileo_session_id(conversation_id, user)
+        galileo_context.set_session(session_id)
         # Without an explicit start_trace/conclude, Splunk Agent Observability (Galileo) lazily creates the
         # trace from whichever child span happens to log first — so the trace's
         # own input/output end up being an arbitrary tool call or LLM message
         # list instead of the actual user question and final answer.
         logger = galileo_context.get_logger_instance()
         logger.start_trace(input=user_message)
+        # Intent router after start_trace so it is a span under the user question,
+        # not a sibling openai-spec trace created on a logger with no parent.
+        use_splunk = _needs_splunk(user_message, history, provider=provider, model=model)
 
         if use_splunk:
             async with mcp_client.splunk_mcp_session() as session:
@@ -544,5 +649,8 @@ async def run_traced_turn(
 
         logger.conclude(output=result, conclude_all=True)
         galileo_context.flush()
+        # start_session POSTs name/external_id only. Stamp the session row so the
+        # list/card shows the first question and the latest reply.
+        _stamp_session_io(logger, conversation_id, user_message, result, session_id)
         remember_turn(conversation_id, user_message, result)
         return result
