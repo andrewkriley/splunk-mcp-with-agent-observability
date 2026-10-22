@@ -11,7 +11,8 @@ in `build.md`'s troubleshooting for why this came up.
 
 ## Cisco Live APJC 2026: one LiteLLM key, two callers
 
-On the shared instance (`https://mcp-lab.apps.andrewriley.info`) the chat
+On the shared instance (`https://splunk-ao.buildermate.ai`, leftover
+`https://mcp-lab.apps.andrewriley.info`) the chat
 app and Galileo's judge can use the **same** public edge LiteLLM
 (`https://litellm.apps.andrewriley.info/v1`, model `bedrock-claude`).
 
