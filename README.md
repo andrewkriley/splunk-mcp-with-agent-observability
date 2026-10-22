@@ -7,6 +7,9 @@ through [MCP](https://modelcontextprotocol.io) and reports agent observability
 signals to Splunk Agent Observability. Traces can go to Galileo or to
 Agent Observability in Splunk Observability Cloud, switched per question.
 
+Shared Cisco Live workshop: [https://splunk-ao.buildermate.ai](https://splunk-ao.buildermate.ai)
+(leftover [mcp-lab.apps.andrewriley.info](https://mcp-lab.apps.andrewriley.info)).
+
 Dependencies:
 
 1. [Splunk Show workshop](https://show.splunk.com/template/946/)
